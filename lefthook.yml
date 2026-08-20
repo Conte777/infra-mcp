@@ -1,0 +1,19 @@
+# Enable with `task hooks`. Sequential on purpose: fmt rewrites files that the
+# later jobs then read. Integration tests and govulncheck stay in CI only.
+pre-commit:
+  jobs:
+    - name: fmt
+      glob: &go_files
+        - "*.go"
+        - "go.mod"
+        - "go.sum"
+      run: task fmt
+      stage_fixed: true
+
+    - name: lint
+      glob: *go_files
+      run: task lint
+
+    - name: test
+      glob: *go_files
+      run: task test
