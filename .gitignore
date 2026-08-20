@@ -1,0 +1,17 @@
+# local tool binaries installed by `make tools`
+/bin/
+
+# build output
+/dist/
+
+# go test artifacts
+*.test
+*.out
+
+# local config with secrets substituted in
+*.local.json
+
+# per-developer hook overrides
+/lefthook-local.yml
+
+.DS_Store

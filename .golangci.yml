@@ -1,0 +1,76 @@
+version: "2"
+
+run:
+  timeout: 5m
+  # integration tests and their harness sit behind this tag; lint them too
+  build-tags:
+    - integration
+
+linters:
+  default: none
+  enable:
+    # errors
+    - errcheck # swallowed error becomes a silently wrong answer to the model
+    - errorlint # errors.Is/As instead of == and type assertions
+    - nilerr # returning nil where err is non-nil
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    # database and network resources
+    - rowserrcheck # sql.Rows.Err() left unchecked hides a partial result set
+    - sqlclosecheck # unclosed sql.Rows/Stmt leaks a pooled connection
+    - bodyclose
+    - noctx # requests without a context are unstoppable
+    # context safety
+    - contextcheck
+    - fatcontext
+    # security
+    - gosec
+    # correctness details
+    - durationcheck
+    - copyloopvar
+    - makezero
+    - unconvert
+    - wastedassign
+    - usestdlibvars
+    - exptostd
+    # style
+    - revive
+    - misspell
+    - nolintlint # a nolint without an explanation is invisible debt
+
+  settings:
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: increment-decrement
+        - name: package-comments
+        - name: var-naming
+
+    gosec:
+      excludes:
+        - G104 # duplicates errcheck
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    presets: [] # no implicit exclusions — every skip is written down here
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec # hardcoded test credentials are not a finding
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/Conte777/infra-mcp

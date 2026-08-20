@@ -1,0 +1,119 @@
+version: "3"
+
+vars:
+  BIN: "{{.ROOT_DIR}}/bin"
+  GOLANGCI_LINT_VERSION: v2.12.2
+  GOFUMPT_VERSION: v0.11.0
+  GOVULNCHECK_VERSION: v1.7.0
+  LEFTHOOK_VERSION: v2.1.10
+
+env:
+  GOBIN: "{{.ROOT_DIR}}/bin"
+
+tasks:
+  default:
+    desc: Format, lint and unit-test
+    cmds:
+      - task: fmt
+      - task: lint
+      - task: test
+
+  tools:
+    desc: Install pinned dev tools into ./bin
+    deps: [tools:golangci-lint, tools:gofumpt, tools:govulncheck, tools:lefthook]
+
+  tools:golangci-lint:
+    internal: true
+    status:
+      - test -x {{.BIN}}/golangci-lint
+      - '{{.BIN}}/golangci-lint --version | grep -q {{trimPrefix "v" .GOLANGCI_LINT_VERSION}}'
+    cmds:
+      - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}}
+
+  tools:gofumpt:
+    internal: true
+    status:
+      - test -x {{.BIN}}/gofumpt
+    cmds:
+      - go install mvdan.cc/gofumpt@{{.GOFUMPT_VERSION}}
+
+  tools:govulncheck:
+    internal: true
+    status:
+      - test -x {{.BIN}}/govulncheck
+    cmds:
+      - go install golang.org/x/vuln/cmd/govulncheck@{{.GOVULNCHECK_VERSION}}
+
+  tools:lefthook:
+    internal: true
+    status:
+      - test -x {{.BIN}}/lefthook
+    cmds:
+      - go install github.com/evilmartians/lefthook/v2@{{.LEFTHOOK_VERSION}}
+
+  fmt:
+    desc: Rewrite sources with gofumpt
+    deps: [tools:gofumpt]
+    cmds:
+      - "{{.BIN}}/gofumpt -l -w ."
+
+  fmt:check:
+    desc: Fail if sources are not gofumpt-ed
+    deps: [tools:gofumpt]
+    cmds:
+      - |
+        out=$({{.BIN}}/gofumpt -l .)
+        if [ -n "$out" ]; then
+          echo "not gofumpt-ed:"
+          echo "$out"
+          exit 1
+        fi
+
+  lint:
+    desc: go vet + golangci-lint + format check
+    deps: [tools:golangci-lint]
+    cmds:
+      - task: fmt:check
+      - go vet ./...
+      - "{{.BIN}}/golangci-lint run"
+
+  test:
+    desc: Unit tests
+    cmds:
+      - go test -race ./...
+
+  test:integration:
+    desc: Integration tests against real containers (needs a docker daemon)
+    cmds:
+      - go test -race -tags=integration ./...
+
+  vuln:
+    desc: Scan dependencies for known vulnerabilities
+    deps: [tools:govulncheck]
+    cmds:
+      - "{{.BIN}}/govulncheck ./..."
+
+  build:
+    desc: Build every server binary into ./bin
+    cmds:
+      - go build -o {{.BIN}}/ ./cmd/...
+
+  tidy:
+    desc: Sync go.mod and go.sum with the imports
+    cmds:
+      - go mod tidy
+
+  tidy:check:
+    desc: Fail if go.mod or go.sum is out of sync with the imports
+    cmds:
+      - go mod tidy -diff
+
+  hooks:
+    desc: Install the git hooks declared in lefthook.yml
+    deps: [tools:lefthook]
+    cmds:
+      - "{{.BIN}}/lefthook install"
+
+  clean:
+    cmds:
+      - rm -rf {{.BIN}}
