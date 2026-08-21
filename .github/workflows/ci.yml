@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lint, test, "test:integration", vuln, "tidy:check"]
+        target: [lint, test, "test:integration", vuln, "tidy:check", "schema:check"]
     name: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v6
