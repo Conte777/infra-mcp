@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Conte777/infra-mcp/internal/mcpsrv/block"
 )
 
 // Common is the part of a source config the core itself reads. Every source
@@ -29,23 +31,28 @@ type Output struct {
 	MaxCellChars int `json:"maxCellChars,omitzero" jsonschema:"maximum characters in one table cell"`
 }
 
+// Budget is the output group as the renderer's cap on one answer.
+func (o Output) Budget() block.Budget {
+	return block.Budget{MaxRows: o.MaxRows, MaxBytes: o.MaxBytes, MaxCellChars: o.MaxCellChars}
+}
+
 // Tools splits into the write half the core owns and a read half each source
 // shapes for itself.
 type Tools[Read any] struct {
-	Write Write `json:"write,omitzero" jsonschema:"write tools"`
-	Read  Read  `json:"read,omitzero" jsonschema:"read tools"`
+	Write WriteTools `json:"write,omitzero" jsonschema:"write tools"`
+	Read  Read       `json:"read,omitzero" jsonschema:"read tools"`
 }
 
-// Write is the core's half of the tools group: it decides whether write tools
-// carry the confirmation marker.
-type Write struct {
+// WriteTools is the core's half of the tools group: it decides whether write
+// tools carry the confirmation marker.
+type WriteTools struct {
 	RequireConfirmation bool `json:"requireConfirmation,omitzero" jsonschema:"ask the user before every write tool call"`
 }
 
 // Settings is everything the core reads out of a source config.
 type Settings struct {
 	Output Output
-	Write  Write
+	Write  WriteTools
 }
 
 // Settings implements [ConfigPtr].
