@@ -82,6 +82,16 @@ tasks:
     cmds:
       - go test -race ./...
 
+  schema:
+    desc: Regenerate the committed config JSON Schemas from the Go types
+    cmds:
+      - go test ./internal/source/... -run TestSchemaMatchesCommittedFile -update
+
+  schema:check:
+    desc: Fail if a committed JSON Schema drifted from its Go type
+    cmds:
+      - go test ./internal/source/... -run TestSchemaMatchesCommittedFile
+
   test:integration:
     desc: Integration tests against real containers (needs a docker daemon)
     cmds:

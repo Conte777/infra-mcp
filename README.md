@@ -24,6 +24,8 @@ task         # fmt + lint + unit tests
 | `task test`            | unit tests with the race detector                     |
 | `task test:integration`| integration tests against real containers             |
 | `task vuln`            | govulncheck over the dependency tree                  |
+| `task schema`          | regenerate the committed config JSON Schemas          |
+| `task schema:check`    | fail if a committed schema drifted from its Go type   |
 | `task tidy:check`      | fail if `go.mod`/`go.sum` drifted from the imports    |
 | `task build`           | build every server binary into `./bin`                |
 
@@ -34,6 +36,7 @@ CI runs the same targets, so a green local run means a green pipeline.
 ```
 cmd/infra-mcp-<source>/   one binary per source; the binary name is the release name
 internal/                 implementation, not importable from outside the module
+schema/                   JSON Schema per source config, generated from the Go types
 docs/adr/                 architecture decision records
 CONTEXT.md                domain glossary
 ```

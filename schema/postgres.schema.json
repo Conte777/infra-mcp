@@ -1,0 +1,182 @@
+{
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "URL of the JSON Schema describing this file"
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "maxRows": {
+          "type": "integer",
+          "description": "maximum rows in a table answer"
+        },
+        "maxBytes": {
+          "type": "integer",
+          "description": "maximum bytes of rendered markdown"
+        },
+        "maxCellChars": {
+          "type": "integer",
+          "description": "maximum characters in one table cell"
+        }
+      },
+      "description": "limits on the size of a tool answer",
+      "additionalProperties": false
+    },
+    "tools": {
+      "type": "object",
+      "properties": {
+        "write": {
+          "type": "object",
+          "properties": {
+            "requireConfirmation": {
+              "type": "boolean",
+              "description": "ask the user before every write tool call"
+            }
+          },
+          "description": "write tools",
+          "additionalProperties": false
+        },
+        "read": {
+          "type": "object",
+          "properties": {
+            "extraDenyFunctions": {
+              "type": [
+                "null",
+                "array"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "function names to add to the built-in deny list"
+            }
+          },
+          "description": "read tools",
+          "additionalProperties": false
+        }
+      },
+      "description": "per-tool behaviour",
+      "additionalProperties": false
+    },
+    "connection": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "postgres host"
+        },
+        "port": {
+          "type": "integer",
+          "description": "postgres port"
+        },
+        "user": {
+          "type": "string",
+          "description": "role to connect as"
+        },
+        "password": {
+          "type": "string",
+          "description": "password as ${VAR}, naming an environment variable"
+        },
+        "sslmode": {
+          "type": "string",
+          "description": "libpq sslmode",
+          "enum": [
+            "disable",
+            "prefer",
+            "require",
+            "verify-ca",
+            "verify-full"
+          ]
+        }
+      },
+      "description": "how to reach the postgres server",
+      "required": [
+        "host",
+        "user",
+        "password"
+      ],
+      "additionalProperties": false
+    },
+    "databases": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "type": "string",
+          "description": "database to connect to, and the only one reachable unless showAll is set"
+        },
+        "showAll": {
+          "type": "boolean",
+          "description": "allow tools into every database of the cluster"
+        },
+        "exclude": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "glob patterns of databases to hide when showAll is set"
+        }
+      },
+      "description": "which databases the tools may touch",
+      "required": [
+        "default"
+      ],
+      "additionalProperties": false
+    },
+    "pool": {
+      "type": "object",
+      "properties": {
+        "maxDatabases": {
+          "type": "integer",
+          "description": "how many databases stay open at once"
+        },
+        "maxConnsPerDatabase": {
+          "type": "integer",
+          "description": "pool size for one database"
+        },
+        "idleTimeout": {
+          "type": "string",
+          "description": "how long an unused pool stays open",
+          "pattern": "^\\d+(ms|s|m|h)$"
+        },
+        "eagerInit": {
+          "type": "boolean",
+          "description": "connect at startup instead of on the first tool call"
+        }
+      },
+      "description": "connection pooling",
+      "additionalProperties": false
+    },
+    "timeouts": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "SET LOCAL statement_timeout for a read transaction",
+          "pattern": "^\\d+(ms|s|m|h)$"
+        },
+        "lock": {
+          "type": "string",
+          "description": "SET LOCAL lock_timeout for a read transaction",
+          "pattern": "^\\d+(ms|s|m|h)$"
+        },
+        "connect": {
+          "type": "string",
+          "description": "limit on establishing a connection",
+          "pattern": "^\\d+(ms|s|m|h)$"
+        }
+      },
+      "description": "query and connection deadlines",
+      "additionalProperties": false
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "connection",
+    "databases"
+  ],
+  "additionalProperties": false
+}

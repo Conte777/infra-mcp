@@ -3,6 +3,7 @@ module github.com/Conte777/infra-mcp
 go 1.26
 
 require (
+	github.com/google/jsonschema-go v0.4.3
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
