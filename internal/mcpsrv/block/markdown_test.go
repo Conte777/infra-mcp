@@ -243,6 +243,80 @@ func TestBudgetIsSharedAcrossBlocks(t *testing.T) {
 	}
 }
 
+func TestMaxCellCharsCutsTheValueNotTheTable(t *testing.T) {
+	out := Markdown([]Block{Table{
+		Columns: []string{"id", "payload"},
+		Rows:    [][]any{{1, strings.Repeat("j", 50)}, {2, "short"}},
+	}}, Budget{MaxCellChars: 10})
+
+	if !strings.Contains(out, "|1|jjjjjjjjjj…|\n") {
+		t.Fatalf("cell not cut to 10 characters: %q", out)
+	}
+	if !strings.Contains(out, "|2|short|\n") {
+		t.Fatalf("a short value was touched: %q", out)
+	}
+	if !strings.Contains(out, "Values longer than 10 characters are cut") {
+		t.Fatalf("a cut cell went unannounced: %q", out)
+	}
+	if strings.Contains(out, "rows — the") {
+		t.Fatalf("cutting a cell must not report a row truncation: %q", out)
+	}
+}
+
+func TestMaxCellCharsCutsOnRuneBoundary(t *testing.T) {
+	out := Markdown([]Block{Table{
+		Columns: []string{"s"},
+		Rows:    [][]any{{"привет мир"}},
+	}}, Budget{MaxCellChars: 6})
+
+	if !strings.Contains(out, "|привет…|") {
+		t.Fatalf("multibyte value cut wrongly: %q", out)
+	}
+}
+
+// Escaping expands a newline into two characters; counting after it would charge the value for the escape.
+func TestMaxCellCharsCountsTheValueNotItsEscape(t *testing.T) {
+	out := Markdown([]Block{Table{
+		Columns: []string{"s"},
+		Rows:    [][]any{{"a\nbc"}},
+	}}, Budget{MaxCellChars: 4})
+
+	if !strings.Contains(out, "|a\\nbc|") {
+		t.Fatalf("value of 4 characters was cut: %q", out)
+	}
+	if strings.Contains(out, "…") {
+		t.Fatalf("value of 4 characters was cut: %q", out)
+	}
+}
+
+// The point of the key: without it three blobs spend the byte budget the other rows needed.
+func TestMaxCellCharsRunsBeforeMaxBytes(t *testing.T) {
+	rows := make([][]any, 20)
+	for i := range rows {
+		rows[i] = []any{i, strings.Repeat("b", 400)}
+	}
+	blocks := []Block{Table{Columns: []string{"id", "blob"}, Rows: rows}}
+
+	capped := Markdown(blocks, Budget{MaxBytes: 1200, MaxCellChars: 20})
+	uncapped := Markdown(blocks, Budget{MaxBytes: 1200})
+
+	if got := strings.Count(capped, "|bbb"); got != len(rows) {
+		t.Fatalf("capped cells still cost rows: %d of %d shown", got, len(rows))
+	}
+	if got := strings.Count(uncapped, "|bbb"); got >= len(rows) {
+		t.Fatalf("uncapped run was expected to lose rows to the blobs, got %d", got)
+	}
+}
+
+func TestZeroMaxCellCharsLeavesValuesWhole(t *testing.T) {
+	long := strings.Repeat("k", 500)
+	out := Markdown([]Block{Table{Columns: []string{"s"}, Rows: [][]any{{long}}}}, Budget{})
+
+	if !strings.Contains(out, long) {
+		t.Fatalf("value cut without a cell limit: %q", out)
+	}
+}
+
 func TestDroppedBlocksAreAnnounced(t *testing.T) {
 	rows := make([][]any, 100)
 	for i := range rows {
@@ -252,7 +326,7 @@ func TestDroppedBlocksAreAnnounced(t *testing.T) {
 	out := Markdown([]Block{
 		Table{Columns: []string{"payload"}, Rows: rows},
 		Code{Lang: "sql", Text: "SELECT 1;"},
-	}, Budget{MaxBytes: noticeReserve + 10})
+	}, Budget{MaxBytes: noticeReserve(Budget{}) + 10})
 
 	if !strings.Contains(out, moreTruncated) {
 		t.Fatalf("a dropped block went unannounced: %q", out)
@@ -276,8 +350,11 @@ func TestOutputNeverExceedsBudget(t *testing.T) {
 	}
 
 	for budget := 400; budget <= 4000; budget += 37 {
-		if out := Markdown(blocks, Budget{MaxBytes: budget}); len(out) > budget {
-			t.Fatalf("budget %d produced %d bytes", budget, len(out))
+		for _, cell := range []int{0, 8} {
+			bud := Budget{MaxBytes: budget, MaxCellChars: cell}
+			if out := Markdown(blocks, bud); len(out) > budget {
+				t.Fatalf("budget %d (maxCellChars %d) produced %d bytes", budget, cell, len(out))
+			}
 		}
 	}
 }

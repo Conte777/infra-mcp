@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Budget caps a rendered response; zero disables a limit, and whichever is reached first truncates.
@@ -13,6 +14,8 @@ type Budget struct {
 	MaxRows int
 	// MaxBytes bounds the whole response, block framing excepted: a table head or a code fence is emitted even when it does not fit.
 	MaxBytes int
+	// MaxCellChars caps one table cell in runes, applied before MaxBytes: without it three JSON blobs cost the other 197 rows.
+	MaxCellChars int
 }
 
 // limitKind names the cap that truncated a block; it goes into the notice, because it decides which way the model should narrow.
@@ -32,11 +35,11 @@ func Markdown(blocks []Block, bud Budget) string {
 	if rem <= 0 {
 		rem = math.MaxInt
 	} else {
-		rem -= noticeReserve // the notice has to fit inside the budget it reports on
+		rem -= noticeReserve(bud) // the notice has to fit inside the budget it reports on
 	}
 
 	var parts, notices []string
-	dropped := 0
+	dropped, cellsCut := 0, false
 	for i, b := range blocks {
 		if rem <= 0 {
 			dropped = len(blocks) - i
@@ -45,18 +48,19 @@ func Markdown(blocks []Block, bud Budget) string {
 		if len(parts) > 0 {
 			rem -= len(blockSep)
 		}
-		text, notice := renderBlock(b, bud.MaxRows, rem)
-		rem -= len(text)
-		if notice != "" {
-			notices = append(notices, notice)
+		r := renderBlock(b, bud, rem)
+		rem -= len(r.text)
+		cellsCut = cellsCut || r.cellsCut
+		if r.notice != "" {
+			notices = append(notices, r.notice)
 		}
-		if text != "" {
-			parts = append(parts, text)
+		if r.text != "" {
+			parts = append(parts, r.text)
 		}
 	}
 
 	out := strings.Join(parts, blockSep)
-	head := noticeHead(notices, dropped)
+	head := noticeHead(notices, dropped, cellsCut, bud.MaxCellChars)
 	if head == "" {
 		return out
 	}
@@ -65,23 +69,36 @@ func Markdown(blocks []Block, bud Budget) string {
 }
 
 // One notice covers the whole response: a line per truncated block would spend the budget on the report instead of the data.
-func noticeHead(notices []string, dropped int) string {
+func noticeHead(notices []string, dropped int, cellsCut bool, maxCellChars int) string {
+	var head string
 	switch {
 	case len(notices) == 0 && dropped == 0:
-		return ""
+		head = ""
 	case len(notices) == 0:
-		return droppedNotice(dropped)
+		head = droppedNotice(dropped)
 	case len(notices) > 1 || dropped > 0:
-		return notices[0] + moreTruncated
+		head = notices[0] + moreTruncated
 	default:
-		return notices[0]
+		head = notices[0]
 	}
+
+	if !cellsCut {
+		return head
+	}
+	// A cut cell is invisible in the data: without this line the model reads half a JSON blob as the whole value.
+	return strings.TrimPrefix(head+cellClause(maxCellChars), " ")
 }
 
-func renderBlock(b Block, maxRows, limit int) (text, notice string) {
+type rendered struct {
+	text     string
+	notice   string
+	cellsCut bool
+}
+
+func renderBlock(b Block, bud Budget, limit int) rendered {
 	switch v := b.(type) {
 	case Table:
-		return renderTable(v, maxRows, limit)
+		return renderTable(v, bud, limit)
 	case Code:
 		return renderCode(v, limit)
 	case KeyValues:
@@ -89,25 +106,28 @@ func renderBlock(b Block, maxRows, limit int) (text, notice string) {
 	case Text:
 		return renderText(v, limit)
 	}
-	return "", ""
+	return rendered{}
 }
 
-func renderTable(t Table, maxRows, limit int) (string, string) {
+func renderTable(t Table, bud Budget, limit int) rendered {
 	if len(t.Columns) == 0 {
-		return "", ""
+		return rendered{}
 	}
 
 	rows := t.Rows
 	kind := noLimit
-	if maxRows > 0 && len(rows) > maxRows {
-		rows = rows[:maxRows]
+	if bud.MaxRows > 0 && len(rows) > bud.MaxRows {
+		rows = rows[:bud.MaxRows]
 		kind = rowLimit
 	}
 
 	head := tableHead(t.Columns)
 	lines := make([]string, len(rows))
+	cellsCut := false
 	for i, row := range rows {
-		lines[i] = tableRow(row, len(t.Columns))
+		var cut bool
+		lines[i], cut = tableRow(row, len(t.Columns), bud.MaxCellChars)
+		cellsCut = cellsCut || cut
 	}
 
 	total := max(t.Total, len(t.Rows))
@@ -117,32 +137,32 @@ func renderTable(t Table, maxRows, limit int) (string, string) {
 	if notice == "" && kind == rowLimit {
 		notice = rowsNotice(shown, total, rowLimit)
 	}
-	return head + strings.Join(lines[:shown], ""), notice
+	return rendered{text: head + strings.Join(lines[:shown], ""), notice: notice, cellsCut: cellsCut}
 }
 
-func renderCode(c Code, limit int) (string, string) {
+func renderCode(c Code, limit int) rendered {
 	fence := fenceFor(c.Text)
 	head := fence + c.Lang + "\n"
 	tail := fence + "\n"
 
 	lines := splitLines(c.Text)
 	shown, notice := fitWithNotice(len(head)+len(tail), lines, limit, len(lines), linesNotice)
-	return head + strings.Join(lines[:shown], "") + tail, notice
+	return rendered{text: head + strings.Join(lines[:shown], "") + tail, notice: notice}
 }
 
-func renderKeyValues(kv KeyValues, limit int) (string, string) {
+func renderKeyValues(kv KeyValues, limit int) rendered {
 	lines := make([]string, len(kv))
 	for i, p := range kv {
 		lines[i] = escapeLine(p.Key) + ": " + escapeLine(p.Value) + "\n"
 	}
 	shown, notice := fitWithNotice(0, lines, limit, len(lines), entriesNotice)
-	return strings.Join(lines[:shown], ""), notice
+	return rendered{text: strings.Join(lines[:shown], ""), notice: notice}
 }
 
-func renderText(t Text, limit int) (string, string) {
+func renderText(t Text, limit int) rendered {
 	lines := splitLines(string(t))
 	shown, notice := fitWithNotice(0, lines, limit, len(lines), linesNotice)
-	return strings.Join(lines[:shown], ""), notice
+	return rendered{text: strings.Join(lines[:shown], ""), notice: notice}
 }
 
 func fitWithNotice(fixed int, lines []string, limit, total int, notice func(shown, total int) string) (int, string) {
@@ -167,14 +187,24 @@ func fit(fixed int, lines []string, limit int) int {
 
 const moreTruncated = " Later blocks of this response were cut or dropped for the same reason."
 
-// Bytes held back from MaxBytes so the notice always fits; the bound is the widest notice this package can produce.
-var noticeReserve = max(
-	len(rowsNotice(math.MaxInt, math.MaxInt, byteLimit))+len(moreTruncated),
-	len(droppedNotice(math.MaxInt)),
-) + 2
+// Bytes held back from MaxBytes so the notice always fits; the bound is the widest notice this budget can produce.
+func noticeReserve(bud Budget) int {
+	n := max(
+		len(rowsNotice(math.MaxInt, math.MaxInt, byteLimit))+len(moreTruncated),
+		len(droppedNotice(math.MaxInt)),
+	)
+	if bud.MaxCellChars > 0 {
+		n += len(cellClause(bud.MaxCellChars))
+	}
+	return n + 2
+}
 
 func droppedNotice(dropped int) string {
 	return fmt.Sprintf("%d further blocks of this response were dropped — the %s output budget was reached.", dropped, byteLimit)
+}
+
+func cellClause(maxCellChars int) string {
+	return fmt.Sprintf(" Values longer than %d characters are cut and end with `…`; ask for the full value with a query that selects it alone.", maxCellChars)
 }
 
 // Every notice names the next move: a bare "truncated" invites the model to repeat the call and get the same cut.
@@ -211,17 +241,27 @@ func tableHead(cols []string) string {
 }
 
 // Rows are forced rectangular against Columns: a ragged row would shift every cell after it with nothing to show for it.
-func tableRow(row []any, cols int) string {
+func tableRow(row []any, cols, maxCellChars int) (string, bool) {
 	var b strings.Builder
+	cut := false
 	b.WriteByte('|')
 	for i := range cols {
 		if i < len(row) {
-			b.WriteString(escapeCell(cellText(row[i])))
+			s, c := capCell(cellText(row[i]), maxCellChars)
+			cut = cut || c
+			b.WriteString(escapeCell(s)) // cap first: escaping would make \n count as two of the value's characters
 		}
 		b.WriteByte('|')
 	}
 	b.WriteByte('\n')
-	return b.String()
+	return b.String(), cut
+}
+
+func capCell(s string, maxChars int) (string, bool) {
+	if maxChars <= 0 || utf8.RuneCountInString(s) <= maxChars {
+		return s, false
+	}
+	return string([]rune(s)[:maxChars]) + "…", true
 }
 
 // A newline in a value splits the row in two and the output still looks like valid markdown, so escaping is correctness, not polish.
