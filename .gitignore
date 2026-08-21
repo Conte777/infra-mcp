@@ -15,3 +15,9 @@
 /lefthook-local.yml
 
 .DS_Store
+
+# a global ignore hides these; this repo keeps its agent instructions in tree
+!CLAUDE.md
+!.claude/
+# ...but not the worktrees Claude Code checks out under it
+/.claude/worktrees/
