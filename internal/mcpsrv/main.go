@@ -104,7 +104,7 @@ func parseFlags(source string, args []string) (options, error) {
 	fs.StringVar(&opts.profile, "profile", DefaultProfile,
 		"profile: the config read is <source>.<profile>.json")
 	fs.StringVar(&opts.httpAddr, "http", "",
-		"serve streamable HTTP on this address instead of stdio")
+		"serve streamable HTTP on this address instead of stdio; unauthenticated, so bind it to a loopback address")
 	fs.StringVar(&level, "log-level", level, "debug, info, warn or error")
 	fs.BoolVar(&opts.initConfig, "init", false, "write a minimal config file and exit")
 	fs.BoolVar(&opts.printSchema, "print-config-schema", false, "print the config JSON Schema and exit")
@@ -183,6 +183,12 @@ func serve[C any, P ConfigPtr[C]](spec Spec[C], loc Location, opts options, log 
 		err = serveStdio(ctx, server, log)
 	}
 
+	// Closing the source under a call that is still running would pull the
+	// pool out from under it; the process is leaving anyway, so leave it be.
+	if errors.Is(err, errDrainTimeout) {
+		log.Warn("leaving with calls still running", "grace", shutdownGrace)
+		return exitOK
+	}
 	if closeErr := spec.Source.Close(); closeErr != nil {
 		log.Error("source did not close cleanly", "error", closeErr)
 	}

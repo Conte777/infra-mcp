@@ -125,6 +125,19 @@ func (l Location) XDGPath() string {
 	return filepath.Join(dir, "infra-mcp", l.Source+"."+l.Profile+".json")
 }
 
+// InitPath is where --init writes, following the same order [Location.Resolve]
+// reads in. Writing the XDG file while the environment variable points
+// elsewhere would report success on a file the server never reads.
+func (l Location) InitPath() string {
+	if l.Flag != "" {
+		return l.Flag
+	}
+	if p := os.Getenv(l.EnvVar()); p != "" {
+		return p
+	}
+	return l.XDGPath()
+}
+
 // Resolve returns the config path and every location looked at, in the order
 // --config > $INFRA_MCP_<SOURCE>_CONFIG > XDG. A path named explicitly is
 // returned even when it does not exist: silently falling through to the XDG
@@ -261,10 +274,7 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (C
 // complete-with-defaults: a file full of today's defaults would freeze them in
 // place for every user who ran --init once.
 func Init[C any, P ConfigPtr[C]](loc Location, minimal C, schemaURL string) (string, error) {
-	path := loc.Flag
-	if path == "" {
-		path = loc.XDGPath()
-	}
+	path := loc.InitPath()
 	if fileExists(path) {
 		return path, fmt.Errorf("%s already exists", path)
 	}

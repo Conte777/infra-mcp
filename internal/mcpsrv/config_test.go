@@ -255,6 +255,24 @@ func TestInitWritesMinimalAndRefusesOverwrite(t *testing.T) {
 	}
 }
 
+// Init writing the XDG file while the environment variable points elsewhere
+// would report success on a file the server never reads.
+func TestInitWritesWhereResolveWouldLook(t *testing.T) {
+	dir := t.TempDir()
+	loc := Location{Source: "test", Profile: "default"}
+	want := filepath.Join(dir, "from-env.json")
+	t.Setenv(loc.EnvVar(), want)
+
+	got, err := Init(loc, testConfig{}, "https://example.com/schema.json")
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	if got != want {
+		t.Fatalf("Init wrote %q, want the path %s points at", got, loc.EnvVar())
+	}
+}
+
 func TestLoadReportsMissingFileAsConfigError(t *testing.T) {
 	loc := Location{Source: "test", Profile: "default", Flag: filepath.Join(t.TempDir(), "absent.json")}
 
