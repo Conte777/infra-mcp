@@ -100,6 +100,9 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// DefaultProfile is the profile a server runs under when --profile is not given.
+const DefaultProfile = "default"
+
 // Location is where the config for one source and profile may live.
 type Location struct {
 	Source  string // "postgres"

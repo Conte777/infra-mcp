@@ -2,22 +2,12 @@
 package main
 
 import (
-	"flag"
-	"fmt"
 	"os"
 
-	"github.com/Conte777/infra-mcp/internal/buildinfo"
+	"github.com/Conte777/infra-mcp/internal/mcpsrv"
+	"github.com/Conte777/infra-mcp/internal/source/postgres"
 )
 
 func main() {
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Parse()
-
-	if *showVersion {
-		fmt.Println(buildinfo.Version())
-		return
-	}
-
-	fmt.Fprintln(os.Stderr, "infra-mcp-postgres: server not implemented yet")
-	os.Exit(1)
+	os.Exit(mcpsrv.Main(postgres.Spec()))
 }
