@@ -13,6 +13,9 @@ It builds the pinned version on first start — about six seconds — into
 `~/.cache/infra-mcp/`, then runs it directly, and every later start is
 instant. Set `INFRA_MCP_GO` if `go` is not on the PATH Claude Code sees.
 
+The postgres server talks to postgres 14 or newer — the oldest release postgres
+itself still supports.
+
 ```sh
 claude plugin marketplace add Conte777/infra-mcp
 claude plugin install infra-mcp-postgres@infra-mcp
