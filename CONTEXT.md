@@ -1,6 +1,6 @@
 # Infra MCP
 
-Набор MCP-серверов, дающих Claude Code доступ к инфраструктуре (postgres, k8s, grafana, redis, kafka, clickhouse), и marketplace, через который они ставятся одним плагином.
+Набор MCP-серверов, дающих Claude Code доступ к инфраструктуре (postgres, k8s, grafana, redis, kafka, clickhouse), и marketplace, через который они ставятся — по плагину на источник.
 
 ## Language
 

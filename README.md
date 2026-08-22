@@ -1,7 +1,8 @@
 # infra-mcp
 
 MCP servers giving Claude Code access to infrastructure — postgres, k8s, grafana,
-redis, kafka, clickhouse — plus the marketplace that installs them as one plugin.
+redis, kafka, clickhouse — plus the marketplace that installs them, one plugin
+per source.
 
 Status: postgres works end to end and installs as a plugin. The five remaining
 sources are next, one plugin each.
@@ -27,7 +28,7 @@ the Bash tool, so writing one is:
 
 ```sh
 infra-mcp-postgres --init                  # writes the file and prints its path
-infra-mcp-postgres --print-config-schema   # every key, with its default
+infra-mcp-postgres --print-config-schema   # every key this build accepts
 ```
 
 That lands in `$XDG_CONFIG_HOME/infra-mcp/postgres.default.json`

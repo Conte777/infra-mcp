@@ -9,8 +9,9 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-// Image is the postgres the integration suite runs against. Keep it in step
-// with the oldest server version we promise to support.
+// Image is the postgres the integration suite runs against. It is the current
+// release, not the oldest one supported (14, ADR-0004): the lower bound is a
+// promise of the README that nothing here checks.
 const Image = "postgres:17-alpine"
 
 const (

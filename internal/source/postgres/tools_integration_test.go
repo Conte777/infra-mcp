@@ -483,6 +483,32 @@ func TestQueryCannotSmuggleASecondStatement(t *testing.T) {
 	}
 }
 
+// Neither statement goes through the cursor, so what holds is pgx's Query
+// staying on the extended protocol with no arguments — unlike Exec, which drops
+// to the simple one and let the tail through before (#10).
+func TestNoCursorPathCannotSmuggleASecondStatement(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE victim (id int)`)
+
+	if _, err := runRead(t, s, cfg,
+		sqlArgs{SQL: "SHOW server_version_num; COMMIT; DROP TABLE victim"}, runQuery); err == nil {
+		t.Error("SHOW carried three statements")
+	}
+	if _, err := runRead(t, s, cfg,
+		explainArgs{SQL: "SELECT 1; COMMIT; DROP TABLE victim"}, explain); err == nil {
+		t.Error("EXPLAIN carried three statements")
+	}
+
+	const count = "SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'victim'"
+	blocks, err := runRead(t, s, cfg, sqlArgs{SQL: count}, runQuery)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if got := column(t, table(t, blocks), "n"); len(got) != 1 || got[0] != "1" {
+		t.Errorf("victim survived = %v, want [1]: a read tool dropped a table", got)
+	}
+}
+
 func TestExplain(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int); INSERT INTO t VALUES (1), (2)`)

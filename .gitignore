@@ -1,4 +1,4 @@
-# local tool binaries installed by `make tools`
+# local tool binaries installed by `task tools`
 /bin/
 
 # build output

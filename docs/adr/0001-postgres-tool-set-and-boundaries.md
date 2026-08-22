@@ -2,7 +2,7 @@
 
 Принято в [#6](https://github.com/Conte777/infra-mcp/issues/6).
 
-Главная ставка проекта — автоодобрение read-инструментов **одной строкой** `mcp__plugin_infra-mcp_postgres__pg_read_*` в `settings.json` ([#3](https://github.com/Conte777/infra-mcp/issues/3)). Отсюда следует всё остальное: имя инструмента — это то, по чему глобится allow-список, а значит read-инструмент обязан быть безопасным по построению, а не по договорённости.
+Главная ставка проекта — автоодобрение read-инструментов **одной строкой** `mcp__plugin_infra-mcp-postgres_postgres__pg_read_*` в `settings.json` ([#3](https://github.com/Conte777/infra-mcp/issues/3)). Форма — `mcp__plugin_<плагин>_<сервер>__<инструмент>`, а плагин с [#11](https://github.com/Conte777/infra-mcp/issues/11) заводится на источник, поэтому `postgres` в строке стоит дважды: это не опечатка. Отсюда следует всё остальное: имя инструмента — это то, по чему глобится allow-список, а значит read-инструмент обязан быть безопасным по построению, а не по договорённости.
 
 Эталонный срез — семь инструментов: `pg_read_list_databases`, `pg_read_list_tables`, `pg_read_describe_table`, `pg_read_query`, `pg_read_explain`, `pg_read_status`, `pg_write_execute`. Схема имени — `<источник>_<read|write>_<действие>`.
 

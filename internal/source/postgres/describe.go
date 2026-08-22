@@ -450,7 +450,7 @@ func writePartitions(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel rel
 	}
 
 	if rest := rel.partitions - listed; rest > 0 {
-		fmt.Fprintf(b, "-- and %d more partitions\n", rest)
+		b.WriteString(commentLine("and %d more partitions", rest))
 	}
 	return nil
 }
