@@ -1,0 +1,36 @@
+#!/bin/sh
+# The plugin ships no binary: it builds the pinned version once and execs it.
+#
+# exec, not `go run`: go run stays in between and never relays the shutdown
+# signal (golang/go#40467), so the server would be orphaned instead of drained.
+#
+# The cache is XDG, not ${CLAUDE_PLUGIN_DATA}: that variable is set for the MCP
+# server process only, and this script is also on the PATH of the Bash tool
+# (that is how `infra-mcp-postgres --init` works in a session). One place, one
+# copy, both entry points.
+set -eu
+
+name=$(basename "$0")
+root=$(cd "$(dirname "$0")/.." && pwd)
+manifest="$root/.claude-plugin/plugin.json"
+
+# The plugin version is the release tag: bumping the manifest is what ships a
+# new binary, so the two cannot drift.
+version=v$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest")
+if [ "$version" = "v" ]; then
+	echo "$name: no version in $manifest" >&2
+	exit 1
+fi
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/infra-mcp/$name"
+bin="$cache/$version/$name"
+
+if [ ! -x "$bin" ]; then
+	GOBIN="$cache/$version" "${INFRA_MCP_GO:-go}" install \
+		"github.com/Conte777/infra-mcp/cmd/$name@$version" >&2
+	# Keep one version: releases would otherwise pile up at ~17 MB each. Unlinking
+	# a running binary is safe here — the inode outlives the name.
+	find "$cache" -mindepth 1 -maxdepth 1 ! -name "$version" -exec rm -rf {} +
+fi
+
+exec "$bin" "$@"
