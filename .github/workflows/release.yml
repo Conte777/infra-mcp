@@ -20,11 +20,17 @@ concurrency:
 
 jobs:
   tag:
+    # DISARMED until #11. Merging the machinery would otherwise tag v0.1.0 on
+    # the spot, and the first run belongs to #11's acceptance — it installs the
+    # plugin from the marketplace, which needs that tag to exist. Arming it is
+    # deleting the `false &&` line below and nothing else.
+    #
     # `branches` above filters workflow_run's head_branch, which for a pull
     # request is the *head* — a fork whose default branch is main produces a ci
     # run matching it. Without the two guards below, that fork's manifest would
     # be tagged onto this repository, and a pushed tag cannot be taken back.
     if: >-
+      false &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository
