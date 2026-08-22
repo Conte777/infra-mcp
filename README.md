@@ -3,14 +3,16 @@
 MCP servers giving Claude Code access to infrastructure — postgres, k8s, grafana,
 redis, kafka, clickhouse — plus the marketplace that installs them as one plugin.
 
-Status: early. Only the repository skeleton and tooling exist; no server is
-implemented yet.
+Status: the shared core is in place — config with a generated JSON Schema,
+markdown rendering, the tool registry, both transports and the process
+lifecycle. `infra-mcp-postgres` builds and serves MCP over stdio or streamable
+HTTP, but so far answers only its status tool: the postgres tools themselves,
+and the plugin that installs the servers, are still to come.
 
 ## Development
 
-Requires Go (version in `go.mod`), [Task](https://taskfile.dev), and a Docker
-daemon for the integration tests. Everything else is installed into `./bin` at
-pinned versions by the Taskfile.
+Requires Go (version in `go.mod`) and [Task](https://taskfile.dev). Everything
+else is installed into `./bin` at pinned versions by the Taskfile.
 
 ```sh
 task hooks   # install the pre-commit hook (once per clone)
@@ -22,7 +24,7 @@ task         # fmt + lint + unit tests
 | `task fmt`             | rewrite sources with gofumpt                          |
 | `task lint`            | format check, `go vet`, golangci-lint                 |
 | `task test`            | unit tests with the race detector                     |
-| `task test:integration`| integration tests against real containers             |
+| `task test:integration`| integration tests against real containers (needs Docker) |
 | `task vuln`            | govulncheck over the dependency tree                  |
 | `task schema`          | regenerate the committed config JSON Schemas          |
 | `task schema:check`    | fail if a committed schema drifted from its Go type   |
@@ -38,6 +40,8 @@ cmd/infra-mcp-<source>/   one binary per source; the binary name is the release 
 internal/                 implementation, not importable from outside the module
 schema/                   JSON Schema per source config, generated from the Go types
 docs/adr/                 architecture decision records
+docs/agents/              conventions for the agents working in this repo
+docs/research/            primary-source findings the architecture rests on
 CONTEXT.md                domain glossary
 ```
 
