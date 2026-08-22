@@ -41,9 +41,9 @@ func (*Source) Instructions() string { return instructions }
 func (s *Source) Tools(r *mcpsrv.Registry[Config]) {
 	rt := r.Runtime()
 
-	// Tools go here, above the guard: below it a degraded start would lose them,
-	// and an allow-list globbing pg_read_* would depend on the server having a
-	// config.
+	// Above the guard: below it a degraded start would lose the tools, and an
+	// allow-list globbing pg_read_* would depend on the server having a config.
+	registerTools(s, r)
 
 	if rt.Degraded != nil {
 		return

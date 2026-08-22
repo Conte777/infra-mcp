@@ -12,6 +12,8 @@ type Table struct {
 	Rows    [][]any
 	// Rows available before any budget; zero or less means the source did not count them.
 	Total int
+	// More says the source stopped reading with rows left: it cannot name a total, but "there is more" is still a fact the notice must carry.
+	More bool
 }
 
 // Code is a fenced block: DDL, an EXPLAIN plan, a manifest, a log tail.

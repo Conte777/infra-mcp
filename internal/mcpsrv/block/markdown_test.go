@@ -90,6 +90,35 @@ func TestMaxRowsTruncatesWithNoticeOnTop(t *testing.T) {
 	}
 }
 
+// A source that stopped reading has no total to name, and a notice that invents
+// one ("of 201") reads as the whole answer.
+func TestMoreSaysThereIsMoreWithoutATotal(t *testing.T) {
+	out := Markdown([]Block{Table{
+		Columns: []string{"id"},
+		Rows:    [][]any{{1}, {2}},
+		More:    true,
+	}}, Budget{MaxRows: 2})
+
+	if !strings.HasPrefix(out, "Showing the first 2 rows and there are more") {
+		t.Fatalf("notice missing or naming a total nobody counted: %q", out)
+	}
+	if strings.Contains(out, " of ") {
+		t.Fatalf("notice invented a total: %q", out)
+	}
+}
+
+func TestMoreIsReportedEvenWhenNothingWasCutHere(t *testing.T) {
+	out := Markdown([]Block{Table{
+		Columns: []string{"id"},
+		Rows:    [][]any{{1}},
+		More:    true,
+	}}, Budget{})
+
+	if !strings.Contains(out, "there are more") {
+		t.Fatalf("a source that stopped short went unreported: %q", out)
+	}
+}
+
 func TestMaxRowsUsesTotalWhenSourceCounted(t *testing.T) {
 	out := Markdown([]Block{Table{
 		Columns: []string{"id"},

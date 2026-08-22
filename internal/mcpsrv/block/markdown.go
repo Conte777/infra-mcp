@@ -29,6 +29,9 @@ const (
 
 const blockSep = "\n"
 
+// unknownTotal is [Table.Total] left unset: the source stopped reading instead of counting, so the notice says there is more rather than naming a total nobody has.
+const unknownTotal = -1
+
 // Markdown renders blocks into the text handed to the model, trimmed to fit bud.
 func Markdown(blocks []Block, bud Budget) string {
 	rem := bud.MaxBytes
@@ -131,10 +134,14 @@ func renderTable(t Table, bud Budget, limit int) rendered {
 	}
 
 	total := max(t.Total, len(t.Rows))
+	if t.Total <= 0 && t.More {
+		total = unknownTotal
+	}
 	shown, notice := fitWithNotice(len(head), lines, limit, total, func(shown, total int) string {
 		return rowsNotice(shown, total, byteLimit)
 	})
-	if notice == "" && kind == rowLimit {
+	// More without a row limit: nothing was cut here, but the source already stopped short.
+	if notice == "" && (kind == rowLimit || t.More) {
 		notice = rowsNotice(shown, total, rowLimit)
 	}
 	return rendered{text: head + strings.Join(lines[:shown], ""), notice: notice, cellsCut: cellsCut}
@@ -191,6 +198,7 @@ const moreTruncated = " Later blocks of this response were cut or dropped for th
 func noticeReserve(bud Budget) int {
 	n := max(
 		len(rowsNotice(math.MaxInt, math.MaxInt, byteLimit))+len(moreTruncated),
+		len(rowsNotice(math.MaxInt, unknownTotal, byteLimit))+len(moreTruncated),
 		len(droppedNotice(math.MaxInt)),
 	)
 	if bud.MaxCellChars > 0 {
@@ -212,6 +220,10 @@ func rowsNotice(shown, total int, kind limitKind) string {
 	next := "add WHERE or aggregate"
 	if kind == byteLimit {
 		next = "select fewer columns or narrow the query"
+	}
+	if total == unknownTotal {
+		return fmt.Sprintf("Showing the first %d rows and there are more — the %s output budget was reached. Re-run and %s; no tool argument raises this limit.",
+			shown, kind, next)
 	}
 	return fmt.Sprintf("Showing %d of %d rows — the %s output budget was reached. Re-run and %s; no tool argument raises this limit.",
 		shown, total, kind, next)
