@@ -1,0 +1,17 @@
+{
+  "$schema": "https://www.schemastore.org/claude-code-marketplace.json",
+  "name": "infra-mcp",
+  "owner": {
+    "name": "Conte777",
+    "url": "https://github.com/Conte777"
+  },
+  "description": "MCP servers for infrastructure sources, one plugin per source.",
+  "plugins": [
+    {
+      "name": "infra-mcp-postgres",
+      "source": "./plugins/postgres",
+      "category": "database",
+      "tags": ["postgres", "sql", "database"]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/infra-mcp-postgres"
+    }
+  }
+}
