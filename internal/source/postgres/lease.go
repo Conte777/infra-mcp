@@ -2,12 +2,14 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Conte777/infra-mcp/internal/mcpsrv"
 	"github.com/Conte777/infra-mcp/internal/mcpsrv/block"
@@ -80,6 +82,13 @@ func inTx[In Input](s *Source, mode pgx.TxAccessMode, h TxFunc[In]) mcpsrv.Handl
 
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: mode})
 		if err != nil {
+			// A pool that never reached the server is not worth a cache slot:
+			// the driver dials again on the next call either way, and a wrong
+			// database name would otherwise push a working pool out.
+			var connErr *pgconn.ConnectError
+			if errors.As(err, &connErr) {
+				s.pools.forget(db)
+			}
 			return nil, failure(ctx, cfg, err)
 		}
 		defer func() {

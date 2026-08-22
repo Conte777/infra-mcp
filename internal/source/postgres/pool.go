@@ -46,6 +46,17 @@ var errPoolsClosed = errors.New("the server is shutting down")
 // pool is created on first use and its failure to connect is not remembered:
 // what is cached is the pool, and pgx dials again on the next call.
 func (p *pools) acquire(ctx context.Context, db string) (*pgxpool.Pool, func(), error) {
+	// Registered before the unlock below, so it runs after it: closing a pool
+	// waits for its connections to come back, and on a socket that stopped
+	// answering the driver takes its cleanup timeout to give up. Under the lock
+	// that wait would stop every other database too.
+	var stale []*pgxpool.Pool
+	defer func() {
+		for _, pool := range stale {
+			pool.Close()
+		}
+	}()
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -55,7 +66,7 @@ func (p *pools) acquire(ctx context.Context, db string) (*pgxpool.Pool, func(), 
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	p.sweepIdle()
+	stale = append(stale, p.sweepIdle()...)
 
 	e, ok := p.byDB[db]
 	if ok {
@@ -80,7 +91,7 @@ func (p *pools) acquire(ctx context.Context, db string) (*pgxpool.Pool, func(), 
 	// Before the overflow check: the pool this call came for is in use from
 	// here, and an eviction that picks it is an eviction of nothing.
 	e.refs++
-	p.evictOverflow()
+	stale = append(stale, p.evictOverflow()...)
 
 	return e.pool, func() { p.release(e) }, nil
 }
@@ -103,17 +114,22 @@ func (p *pools) release(e *entry) {
 }
 
 // evictOverflow drops least-recently-used pools until the cache is back within
-// pool.maxDatabases. Called with the lock held.
-func (p *pools) evictOverflow() {
+// pool.maxDatabases, returning the ones the caller must close. Called with the
+// lock held.
+func (p *pools) evictOverflow() []*pgxpool.Pool {
+	var stale []*pgxpool.Pool
 	for len(p.byDB) > max(p.cfg.Pool.MaxDatabases, 1) {
 		e := p.evictable()
 		if e == nil {
-			return
+			break
 		}
 		p.log.Info("pool evicted", "database", e.db, "inUse", e.refs > 0,
 			"limit", p.cfg.Pool.MaxDatabases)
-		p.drop(e)
+		if pool := p.drop(e); pool != nil {
+			stale = append(stale, pool)
+		}
 	}
+	return stale
 }
 
 // evictable is the least recently used entry, preferring one nobody is using:
@@ -137,38 +153,59 @@ func (p *pools) evictable() *entry {
 // goroutine: the driver closes the idle connections themselves, and what is
 // left here is bookkeeping the next call can just as well reclaim.
 // Called with the lock held.
-func (p *pools) sweepIdle() {
+func (p *pools) sweepIdle() []*pgxpool.Pool {
 	idle := p.cfg.Pool.IdleTimeout.Duration()
 	if idle <= 0 {
-		return
+		return nil
 	}
+	var stale []*pgxpool.Pool
 	now := time.Now()
 	for el := p.lru.Back(); el != nil; {
 		e, _ := el.Value.(*entry)
 		el = el.Prev()
 		if e.refs == 0 && now.Sub(e.idleSince) > idle {
 			p.log.Debug("pool closed after idle", "database", e.db, "idle", idle)
-			p.drop(e)
+			if pool := p.drop(e); pool != nil {
+				stale = append(stale, pool)
+			}
 		}
+	}
+	return stale
+}
+
+// forget drops the pool for db when the call that opened it never got a
+// connection. An entry that cannot connect is still an entry: three wrong
+// database names would push the working pool out of a cache of four.
+func (p *pools) forget(db string) {
+	p.mu.Lock()
+	var stale *pgxpool.Pool
+	if e, ok := p.byDB[db]; ok {
+		stale = p.drop(e)
+	}
+	p.mu.Unlock()
+
+	if stale != nil {
+		stale.Close()
 	}
 }
 
-// drop takes an entry out of the cache and closes it once it is unused. Called
-// with the lock held.
-func (p *pools) drop(e *entry) {
+// drop takes an entry out of the cache and hands back the pool to close, or nil
+// when someone still holds it — then the last release closes it. Closing is the
+// caller's job because it happens outside the lock. Called with the lock held.
+func (p *pools) drop(e *entry) *pgxpool.Pool {
 	delete(p.byDB, e.db)
 	p.lru.Remove(e.el)
 	e.dead = true
-	if e.refs == 0 {
-		// Nobody holds it, so Close returns at once and the lock is not held
-		// long enough to matter.
-		e.pool.Close()
+	if e.refs > 0 {
+		return nil
 	}
+	return e.pool
 }
 
 // Close drops every pool. A pool still in use is closed by whoever releases it
-// last, which is why this does not block: the process is already draining, and
-// the running call has its grace period.
+// last, and the rest are closed without being waited for: the process is
+// leaving, and a pool whose server stopped answering takes the driver's cleanup
+// timeout to give up.
 func (p *pools) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -177,7 +214,9 @@ func (p *pools) Close() {
 	for el := p.lru.Back(); el != nil; {
 		e, _ := el.Value.(*entry)
 		el = el.Prev()
-		p.drop(e)
+		if pool := p.drop(e); pool != nil {
+			go pool.Close()
+		}
 	}
 }
 

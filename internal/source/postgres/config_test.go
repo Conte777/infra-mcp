@@ -141,6 +141,11 @@ func TestLoadRejects(t *testing.T) {
 			reason: "pool.maxConnsPerDatabase",
 		},
 		{
+			name:   "a query with no limit",
+			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"timeouts":{"query":"0s"}}`,
+			reason: "timeouts.query",
+		},
+		{
 			name:   "not JSON",
 			body:   `{`,
 			reason: "JSON",

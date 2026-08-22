@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/Conte777/infra-mcp/internal/mcpsrv"
@@ -39,10 +40,20 @@ func (*Source) Instructions() string { return instructions }
 // start the config is the defaults and no handler will run.
 func (s *Source) Tools(r *mcpsrv.Registry[Config]) {
 	rt := r.Runtime()
+
+	// Tools go here, above the guard: below it a degraded start would lose them,
+	// and an allow-list globbing pg_read_* would depend on the server having a
+	// config.
+
 	if rt.Degraded != nil {
 		return
 	}
 
+	// Building twice is not this source's business to police, but leaking the
+	// first cache — health-check goroutines and all — would be.
+	if s.pools != nil {
+		s.pools.Close()
+	}
 	s.pools = newPools(rt.Config, rt.Logger)
 	if rt.Config.Pool.EagerInit {
 		s.warm(rt.Config, rt.Logger)
@@ -62,6 +73,10 @@ func (s *Source) warm(cfg Config, log *slog.Logger) {
 		if err == nil {
 			defer release()
 			err = pool.Ping(ctx)
+		}
+		if errors.Is(err, errPoolsClosed) {
+			log.Debug("eager init stopped by shutdown", "database", db)
+			return
 		}
 		if err != nil {
 			log.Error("eager init failed", "database", db, "error", err)

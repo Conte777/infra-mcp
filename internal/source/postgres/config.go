@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"reflect"
@@ -135,6 +136,12 @@ func (c *Config) Validate() error {
 	}
 	if n := c.Pool.MaxConnsPerDatabase; n < 1 || n > maxPoolConns {
 		return fmt.Errorf("pool.maxConnsPerDatabase: %d is outside 1..%d", n, maxPoolConns)
+	}
+	// Zero would disable the server-side limit but not [Config.ClientDeadline],
+	// which is derived from it — the call would still be cut off, and the model
+	// would be told the server failed to cancel a limit that was never set.
+	if c.Timeouts.Query <= 0 {
+		return errors.New("timeouts.query: a query needs a limit; the client deadline is derived from it")
 	}
 	for _, pat := range c.Databases.Exclude {
 		ok, err := path.Match(pat, c.Databases.Default)

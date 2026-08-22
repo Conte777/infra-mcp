@@ -108,6 +108,48 @@ func TestWrappersNameAndAnnotateByDoor(t *testing.T) {
 	}
 }
 
+// A pool that never reached the server holds a cache slot for nothing, and a
+// model walking wrong database names would push the working one out.
+func TestLeaseForgetsAPoolThatNeverConnected(t *testing.T) {
+	p := testPools(t, 4, time.Minute)
+	s := &Source{pools: p}
+
+	_, err := inTx(s, pgx.ReadOnly, func(context.Context, pgx.Tx, Config, ConnectionArgs) ([]block.Block, error) {
+		t.Fatal("the handler must not run without a connection")
+		return nil, nil
+	})(context.Background(), p.cfg, ConnectionArgs{})
+
+	var f *mcpsrv.Failure
+	if !errors.As(err, &f) || f.Kind != mcpsrv.KindUnavailable {
+		t.Fatalf("err = %v, want an unavailable failure", err)
+	}
+	if open := p.open(); open != 0 {
+		t.Errorf("%d pools cached after a failed connection, want none", open)
+	}
+}
+
+// Build is exported and says nothing about being called once; a second build
+// must not leave the first cache running with nobody holding it.
+func TestToolsReplacesAnEarlierPoolCache(t *testing.T) {
+	s := &Source{}
+	build := func() {
+		server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+		rt := mcpsrv.NewRuntime[Config, *Config](Defaults(), nil, mcpsrv.Env{}, nil)
+		s.Tools(mcpsrv.NewRegistry(server, Prefix, rt))
+	}
+
+	build()
+	first := s.pools
+	build()
+
+	if s.pools == first {
+		t.Fatal("the second build kept the first cache")
+	}
+	if _, _, err := first.acquire(context.Background(), "app_db"); !errors.Is(err, errPoolsClosed) {
+		t.Errorf("the first cache is still open: %v", err)
+	}
+}
+
 // A handler never runs without a pool, and a server that got this far without
 // one has a config problem to report rather than a nil to dereference.
 func TestHandlerWithoutPools(t *testing.T) {
