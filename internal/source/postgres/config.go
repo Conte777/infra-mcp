@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"reflect"
@@ -127,6 +128,21 @@ func ConfigTypes() mcpsrv.TypeSchemas {
 
 // Validate covers what the schema cannot state.
 func (c *Config) Validate() error {
+	// An explicit zero in the file overrides the default, and a pool sized zero
+	// would be quietly rounded up to something that works — a key that does
+	// nothing is worse than a config that is refused.
+	if c.Pool.MaxDatabases < 1 {
+		return fmt.Errorf("pool.maxDatabases: %d databases is not a pool", c.Pool.MaxDatabases)
+	}
+	if n := c.Pool.MaxConnsPerDatabase; n < 1 || n > maxPoolConns {
+		return fmt.Errorf("pool.maxConnsPerDatabase: %d is outside 1..%d", n, maxPoolConns)
+	}
+	// Zero would disable the server-side limit but not [Config.ClientDeadline],
+	// which is derived from it — the call would still be cut off, and the model
+	// would be told the server failed to cancel a limit that was never set.
+	if c.Timeouts.Query <= 0 {
+		return errors.New("timeouts.query: a query needs a limit; the client deadline is derived from it")
+	}
 	for _, pat := range c.Databases.Exclude {
 		ok, err := path.Match(pat, c.Databases.Default)
 		if err != nil {

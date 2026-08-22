@@ -33,4 +33,4 @@
 
 ## Состояние в коде
 
-Инструментов пока нет — они пишутся в [#18](https://github.com/Conte777/infra-mcp/issues/18); `pg_read_status` регистрирует ядро ([#16](https://github.com/Conte777/infra-mcp/issues/16)). Схема имени и метка подтверждения уже живут в `internal/mcpsrv/registry.go`, ключи `tools.write.requireConfirmation` и `tools.read.extraDenyFunctions` — в `internal/source/postgres/config.go`.
+Инструментов пока нет — они пишутся в [#18](https://github.com/Conte777/infra-mcp/issues/18); `pg_read_status` регистрирует ядро ([#16](https://github.com/Conte777/infra-mcp/issues/16)). Границы, внутри которых они появятся, уже стоят ([#17](https://github.com/Conte777/infra-mcp/issues/17)): `internal/source/postgres/lease.go` открывает `BEGIN TRANSACTION READ ONLY` за read-дверью и ставит `statement_timeout`/`lock_timeout` через `set_config(…, true)` — параметризованную форму `SET LOCAL`. Deny-list функций — в #18, транзакция его не заменяет. Схема имени и метка подтверждения уже живут в `internal/mcpsrv/registry.go`, ключи `tools.write.requireConfirmation` и `tools.read.extraDenyFunctions` — в `internal/source/postgres/config.go`.
