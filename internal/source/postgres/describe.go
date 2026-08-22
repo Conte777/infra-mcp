@@ -300,22 +300,24 @@ func refuseKind(ctx context.Context, tx pgx.Tx, rel relation) error {
 	case "S":
 		f.Hint = "its parameters are in pg_sequences"
 	case "i", "I":
+		// A hintless refusal beats the internal error the raw scan error would
+		// become: the index can be dropped between the two queries, and the
+		// answer that matters is already built.
 		var table string
-		if err := tx.QueryRow(ctx, indexTableSQL, rel.oid).Scan(&table); err != nil {
-			return err
+		if err := tx.QueryRow(ctx, indexTableSQL, rel.oid).Scan(&table); err == nil {
+			f.Hint = oneLine(fmt.Sprintf("it indexes %s, whose description already prints it", table))
 		}
-		f.Hint = oneLine(fmt.Sprintf("it indexes %s, whose description already prints it", table))
 	}
 	return f
 }
 
-// "an index" is the only vowel in the set today; spelling the rule out is what
-// keeps the kind added next from reading wrong.
+// "index" is the only kind that takes "an" today; spelling out the rule rather
+// than the exception is what keeps the kind added next from reading wrong.
 func article(noun string) string {
-	if strings.ContainsRune("aeiou", rune(noun[0])) {
-		return "an"
+	if noun == "" || !strings.ContainsRune("aeiou", rune(noun[0])) {
+		return "a"
 	}
-	return "a"
+	return "an"
 }
 
 func writeView(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel relation) error {
