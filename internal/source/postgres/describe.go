@@ -88,8 +88,10 @@ ORDER BY 1, con.conname`
 // takes a view name, and the oid arrives as its own digits.
 const viewSQL = `SELECT pg_get_viewdef($1::oid, true)`
 
-// Server options are left out on purpose: the server is an object nobody asked
-// about, and its options are the address of a system this tool gave no access to.
+// Its own query, unlike the parent above: this one runs only for a foreign
+// table, where a join would run for every relation. Server options are left out
+// on purpose — the server is an object nobody asked about, and its options are
+// the address of a system this tool gave no access to.
 const foreignTableSQL = `
 SELECT quote_ident(s.srvname), ft.ftoptions
 FROM pg_foreign_table ft
@@ -195,14 +197,14 @@ func headline(rel relation) string {
 		parts = append(parts, size)
 	}
 
-	out := fmt.Sprintf("-- %s: %s\n", rel.name, strings.Join(parts, ", "))
+	out := commentLine("%s: %s", rel.name, strings.Join(parts, ", "))
 	// The bounds go on their own line: a list partition's are a hundred values
 	// long, and the first line has to read the same for every kind.
 	if rel.bound != nil {
-		out += "-- " + oneLine(*rel.bound) + "\n"
+		out += commentLine("%s", *rel.bound)
 	}
 	if rel.comment != nil {
-		out += "-- " + oneLine(*rel.comment) + "\n"
+		out += commentLine("%s", *rel.comment)
 	}
 	return out
 }
@@ -316,11 +318,13 @@ func foreignClause(ctx context.Context, tx pgx.Tx, oid uint32) (string, error) {
 	if err := tx.QueryRow(ctx, foreignTableSQL, oid).Scan(&server, &options); err != nil {
 		return "", err
 	}
-	return " SERVER " + server + optionList(options), nil
+	return " SERVER " + oneLine(server) + optionList(options), nil
 }
 
 // optionList turns the catalog's "name=value" array into the OPTIONS clause
-// postgres itself takes; the value is a literal, so its quotes double.
+// postgres itself takes; the value is a literal, so its quotes double, and it
+// stays on one line for the same reason a comment does — whoever created the
+// foreign table wrote it.
 func optionList(options []string) string {
 	if len(options) == 0 {
 		return ""
@@ -328,7 +332,7 @@ func optionList(options []string) string {
 	parts := make([]string, 0, len(options))
 	for _, option := range options {
 		name, value, _ := strings.Cut(option, "=")
-		parts = append(parts, name+" '"+strings.ReplaceAll(value, "'", "''")+"'")
+		parts = append(parts, oneLine(name)+" '"+oneLine(strings.ReplaceAll(value, "'", "''"))+"'")
 	}
 	return " OPTIONS (" + strings.Join(parts, ", ") + ")"
 }
@@ -438,7 +442,7 @@ func writePartitions(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel rel
 		if err := rows.Scan(&name, &bound); err != nil {
 			return err
 		}
-		fmt.Fprintf(b, "-- partition %s %s\n", name, oneLine(bound))
+		b.WriteString(commentLine("partition %s %s", name, bound))
 		listed++
 	}
 	if err := rows.Err(); err != nil {
@@ -465,9 +469,17 @@ func writeReferences(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel rel
 		if err := rows.Scan(&from, &def); err != nil {
 			return err
 		}
-		fmt.Fprintf(b, "-- referenced by %s: %s\n", from, def)
+		b.WriteString(commentLine("referenced by %s: %s", from, def))
 	}
 	return rows.Err()
+}
+
+// commentLine is the only way a "--" line is written: everything on one is a
+// catalog string, and a newline in any of them ends the comment and leaves the
+// rest reading as DDL the catalog never held. A quoted identifier may legally
+// carry one, and quote_ident does not strip it.
+func commentLine(format string, args ...any) string {
+	return "-- " + oneLine(fmt.Sprintf(format, args...)) + "\n"
 }
 
 // oneLine keeps a comment inside its "--": a newline in it would turn the rest

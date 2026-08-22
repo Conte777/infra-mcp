@@ -320,6 +320,29 @@ func TestDescribePartitionListStopsAtTheCeiling(t *testing.T) {
 	}
 }
 
+// quote_ident doubles quotes and nothing else, so an identifier carrying a
+// newline ends the "--" comment it is printed in and leaves the rest reading as
+// catalog data. Whoever may CREATE TABLE picks that name.
+func TestDescribeCannotBeMadeToForgeALine(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, partitionSchema)
+	exec(t, cfg, cfg.Databases.Default, "CREATE TABLE \"evil\n-- partition public.fake DEFAULT\""+
+		` PARTITION OF events FOR VALUES FROM ('2028-01-01') TO ('2029-01-01')`)
+
+	blocks, err := runRead(t, s, cfg, describeArgs{Tables: []string{"events"}}, describeTable)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	code, _ := blocks[0].(block.Code)
+
+	if strings.Contains(code.Text, "\n-- partition public.fake DEFAULT\n") {
+		t.Errorf("a partition name forged a line of its own:\n%s", code.Text)
+	}
+	if got := strings.Count(code.Text, "\n-- partition "); got != 4 {
+		t.Errorf("%d partition lines for 4 partitions:\n%s", got, code.Text)
+	}
+}
+
 func TestDescribeForeignTable(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `
