@@ -3,6 +3,7 @@ package mcpsrv
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -33,6 +34,20 @@ type Runtime[C any] struct {
 	// Degraded is the config failure a degraded start answers every call with.
 	// While it is set no handler runs, so Config is never read.
 	Degraded error
+	// Env is what the status tool reports.
+	Env Env
+	// Logger writes to stderr. Nil discards: slog.Default writes to stdout,
+	// where the stdio transport lives and a stray line breaks the session.
+	Logger *slog.Logger
+}
+
+var discardLogger = slog.New(slog.DiscardHandler)
+
+func (rt Runtime[C]) logger() *slog.Logger {
+	if rt.Logger == nil {
+		return discardLogger
+	}
+	return rt.Logger
 }
 
 // Registry is the only route into the tool set, and it has exactly two doors.
@@ -108,6 +123,15 @@ func register[C, In any](r *Registry[C], a access, action, description string, h
 		blocks, err := call(ctx, r, h, in)
 		if err != nil {
 			f := asFailure(err)
+			// The cause and nothing past it: a source value or a password
+			// reaching the log is the one thing this line must not do. A
+			// degraded start logs at debug — its reason went out once at
+			// startup, and every call after would repeat it.
+			level := slog.LevelError
+			if r.rt.Degraded != nil {
+				level = slog.LevelDebug
+			}
+			r.rt.logger().Log(ctx, level, "tool call failed", "tool", tool.Name, "kind", f.Kind.String(), "error", err)
 			res := textResult(block.Markdown(f.blocks(), budget))
 			res.SetError(f) // keeps the rendered content, sets isError
 			return res, nil, nil

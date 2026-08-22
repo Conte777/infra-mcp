@@ -100,6 +100,9 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// DefaultProfile is the profile a server runs under when --profile is not given.
+const DefaultProfile = "default"
+
 // Location is where the config for one source and profile may live.
 type Location struct {
 	Source  string // "postgres"
@@ -120,6 +123,19 @@ func (l Location) XDGPath() string {
 		dir = filepath.Join(os.Getenv("HOME"), ".config")
 	}
 	return filepath.Join(dir, "infra-mcp", l.Source+"."+l.Profile+".json")
+}
+
+// InitPath is where --init writes, following the same order [Location.Resolve]
+// reads in. Writing the XDG file while the environment variable points
+// elsewhere would report success on a file the server never reads.
+func (l Location) InitPath() string {
+	if l.Flag != "" {
+		return l.Flag
+	}
+	if p := os.Getenv(l.EnvVar()); p != "" {
+		return p
+	}
+	return l.XDGPath()
 }
 
 // Resolve returns the config path and every location looked at, in the order
@@ -258,10 +274,7 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (C
 // complete-with-defaults: a file full of today's defaults would freeze them in
 // place for every user who ran --init once.
 func Init[C any, P ConfigPtr[C]](loc Location, minimal C, schemaURL string) (string, error) {
-	path := loc.Flag
-	if path == "" {
-		path = loc.XDGPath()
-	}
+	path := loc.InitPath()
 	if fileExists(path) {
 		return path, fmt.Errorf("%s already exists", path)
 	}
