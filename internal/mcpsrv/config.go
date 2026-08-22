@@ -200,7 +200,11 @@ func (e *ConfigError) Error() string {
 // Unwrap implements the errors chain.
 func (e *ConfigError) Unwrap() error { return e.Err }
 
-const initHint = "run with --init to create one"
+const (
+	initHint = "run with --init to create one"
+	// --init refuses to overwrite, so it is no answer to a file that exists.
+	schemaHint = "run with --print-config-schema for the keys this build accepts"
+)
 
 // Load reads the config for loc and applies it on top of defaults. Every
 // failure is a *ConfigError, which the caller turns into a degraded start
@@ -208,9 +212,14 @@ const initHint = "run with --init to create one"
 func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (C, error) {
 	var path string
 	var searched []string
+	var haveFile bool
 	fail := func(reason string, err error) (C, error) {
 		var zero C
-		return zero, &ConfigError{Searched: searched, Path: path, Reason: reason, Hint: initHint, Err: err}
+		hint := initHint
+		if haveFile {
+			hint = schemaHint
+		}
+		return zero, &ConfigError{Searched: searched, Path: path, Reason: reason, Hint: hint, Err: err}
 	}
 
 	path, searched, err := loc.Resolve()
@@ -222,6 +231,7 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (C
 	if err != nil {
 		return fail("cannot be read", err)
 	}
+	haveFile = true
 
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {

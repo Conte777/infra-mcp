@@ -5,7 +5,6 @@ import (
 	"io"
 	"maps"
 	"reflect"
-	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -52,11 +51,13 @@ func PrintSchema[C any](w io.Writer, types TypeSchemas) error {
 }
 
 // SchemaURL is where the committed schema for source lives, pinned to the
-// running binary's version so an older binary points at its own schema.
+// running binary's version so an older binary points at its own schema. Only a
+// release is pinned: every other version names no tag, and the editor would be
+// sent to a URL that does not resolve.
 func SchemaURL(source string) string {
-	ref := buildinfo.Version()
-	if !strings.HasPrefix(ref, "v") {
-		ref = "main"
+	ref := "main"
+	if buildinfo.IsRelease() {
+		ref = buildinfo.Version()
 	}
 	return "https://raw.githubusercontent.com/Conte777/infra-mcp/" + ref + "/schema/" + source + ".schema.json"
 }

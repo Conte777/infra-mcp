@@ -281,8 +281,24 @@ func TestLoadReportsMissingFileAsConfigError(t *testing.T) {
 	if !errors.As(err, &cerr) {
 		t.Fatalf("Load error = %v, want a *ConfigError", err)
 	}
-	if cerr.Hint == "" {
-		t.Error("ConfigError carries no hint; the user is not told what to run")
+	if cerr.Hint != initHint {
+		t.Errorf("Hint = %q, want %q", cerr.Hint, initHint)
+	}
+}
+
+// --init refuses to overwrite, so sending the operator there would strand them.
+func TestLoadHintsAtTheSchemaWhenTheFileExists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.default.json")
+	writeFile(t, path, `{"connection":{"host":"h","password":"${P}"},"nope":1}`)
+	loc := Location{Source: "test", Profile: "default", Flag: path}
+
+	_, err := Load(loc, testConfig{}, nil)
+	var cerr *ConfigError
+	if !errors.As(err, &cerr) {
+		t.Fatalf("Load error = %v, want a *ConfigError", err)
+	}
+	if cerr.Hint != schemaHint {
+		t.Errorf("Hint = %q, want %q", cerr.Hint, schemaHint)
 	}
 }
 
