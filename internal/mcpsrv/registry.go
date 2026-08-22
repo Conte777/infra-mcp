@@ -69,6 +69,16 @@ func NewRegistry[C any](server *mcp.Server, prefix string, rt Runtime[C]) *Regis
 // Registered lists the tools declared so far, in registration order.
 func (r *Registry[C]) Registered() []*mcp.Tool { return r.tools }
 
+// Runtime is what the core already knows while tools are being declared: the
+// config every call will be handed, whether the start is degraded, and a logger
+// that is never nil. A source reads it to build what it opens lazily; nothing in
+// it changes afterwards.
+func (r *Registry[C]) Runtime() Runtime[C] {
+	rt := r.rt
+	rt.Logger = r.rt.logger()
+	return rt
+}
+
 // Handler answers one tool call. It returns blocks; what they are rendered
 // into is not its business.
 type Handler[C, In any] func(ctx context.Context, cfg C, in In) ([]block.Block, error)

@@ -131,6 +131,16 @@ func TestLoadRejects(t *testing.T) {
 			reason: "databases.exclude",
 		},
 		{
+			name:   "a pool of no databases",
+			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"pool":{"maxDatabases":0}}`,
+			reason: "pool.maxDatabases",
+		},
+		{
+			name:   "more connections per database than anyone wants",
+			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"pool":{"maxConnsPerDatabase":5000}}`,
+			reason: "pool.maxConnsPerDatabase",
+		},
+		{
 			name:   "not JSON",
 			body:   `{`,
 			reason: "JSON",
