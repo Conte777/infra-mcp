@@ -7,18 +7,10 @@ import (
 	"strings"
 )
 
-// version is the hook a release build stamps with -ldflags. Nothing stamps it
-// today — the plugin installs through `go install …@<tag>`, where the toolchain
-// records the tag itself — so it is empty in every build we currently produce.
-var version string
-
-// Version returns the stamped version, falling back to the module version the
-// go toolchain records, and finally to "(devel)" for an unstamped local build.
+// Version returns the module version the go toolchain records, falling back to
+// "(devel)" for a build from a clone. The plugin installs through
+// `go install …@<tag>`, so a released binary carries its tag here.
 func Version() string {
-	if version != "" {
-		return version
-	}
-
 	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
 		return info.Main.Version
 	}
@@ -33,8 +25,9 @@ var pseudoVersion = regexp.MustCompile(`[-.]\d{14}-[0-9a-f]{12}$`)
 
 // IsRelease reports whether [Version] names a tag that exists in the repository.
 // A pseudo-version does not, so a URL built from one resolves to nothing.
-func IsRelease() bool {
-	v := Version()
+func IsRelease() bool { return isRelease(Version()) }
+
+func isRelease(v string) bool {
 	// "+dirty" is stamped when the tree has uncommitted changes: no such ref,
 	// and the config types may no longer match the tag's schema anyway.
 	return strings.HasPrefix(v, "v") &&

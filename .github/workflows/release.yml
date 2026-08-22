@@ -1,0 +1,48 @@
+name: release
+
+# The tag is derived from the plugin manifests, never typed a second time:
+# merging the version bump is the whole release. Triggered by ci rather than by
+# push, so the tag can only ever land on a commit whose matrix went green — and
+# `workflow_run` has no path filter, hence the idempotent check below instead of
+# "did plugin.json change".
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+
+jobs:
+  tag:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # the commit ci actually tested, not whatever main points at now
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # full history: the existing tags are what makes a re-run a no-op
+          fetch-depth: 0
+
+      - name: Tag the manifest version
+        run: |
+          version=$(jq -r .version plugins/*/.claude-plugin/plugin.json | sort -u)
+          if [ "$(printf '%s' "$version" | wc -l)" -ne 0 ] || [ -z "$version" ]; then
+            echo "plugin manifests carry no single version: $version" >&2
+            exit 1
+          fi
+
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag is already tagged, nothing to release"
+            exit 0
+          fi
+
+          git tag "$tag"
+          git push origin "$tag"
+          echo "released $tag" >> "$GITHUB_STEP_SUMMARY"

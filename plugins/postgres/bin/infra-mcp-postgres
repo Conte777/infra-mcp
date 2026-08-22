@@ -14,8 +14,8 @@ name=$(basename "$0")
 root=$(cd "$(dirname "$0")/.." && pwd)
 manifest="$root/.claude-plugin/plugin.json"
 
-# The plugin version is the release tag: bumping the manifest is what ships a
-# new binary, so the two cannot drift.
+# The manifest version is the release tag: the release workflow derives the tag
+# from it, so a merged bump is what publishes the version read here.
 version=v$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest")
 if [ "$version" = "v" ]; then
 	echo "$name: no version in $manifest" >&2
@@ -26,11 +26,20 @@ cache="${XDG_CACHE_HOME:-$HOME/.cache}/infra-mcp/$name"
 bin="$cache/$version/$name"
 
 if [ ! -x "$bin" ]; then
-	GOBIN="$cache/$version" "${INFRA_MCP_GO:-go}" install \
-		"github.com/Conte777/infra-mcp/cmd/$name@$version" >&2
+	if ! GOBIN="$cache/$version" "${INFRA_MCP_GO:-go}" install \
+		"github.com/Conte777/infra-mcp/cmd/$name@$version" >&2; then
+		# The raw "unknown revision" above reads as a broken server; the tag is
+		# pushed by CI after the bump merges, so it may simply not exist yet.
+		echo "$name: could not build $version — that release is probably not published yet" >&2
+		exit 1
+	fi
 	# Keep one version: releases would otherwise pile up at ~17 MB each. Unlinking
 	# a running binary is safe here — the inode outlives the name.
-	find "$cache" -mindepth 1 -maxdepth 1 ! -name "$version" -exec rm -rf {} +
+	for stale in "$cache"/*; do
+		if [ -e "$stale" ] && [ "$stale" != "$cache/$version" ]; then
+			rm -rf "$stale"
+		fi
+	done
 fi
 
 exec "$bin" "$@"

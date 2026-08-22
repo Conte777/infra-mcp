@@ -2,24 +2,13 @@ package buildinfo
 
 import "testing"
 
-func TestVersionPrefersStampedValue(t *testing.T) {
-	t.Cleanup(func() { version = "" })
-	version = "v1.2.3"
-
-	if got := Version(); got != "v1.2.3" {
-		t.Fatalf("Version() = %q, want %q", got, "v1.2.3")
-	}
-}
-
-func TestVersionFallsBackWhenUnstamped(t *testing.T) {
+func TestVersionIsNeverEmpty(t *testing.T) {
 	if got := Version(); got == "" {
 		t.Fatal("Version() = \"\", want a non-empty fallback")
 	}
 }
 
 func TestIsRelease(t *testing.T) {
-	t.Cleanup(func() { version = "" })
-
 	for _, tc := range []struct {
 		v    string
 		want bool
@@ -32,9 +21,8 @@ func TestIsRelease(t *testing.T) {
 		{"v1.2.3+dirty", false},
 		{"(devel)", false},
 	} {
-		version = tc.v
-		if got := IsRelease(); got != tc.want {
-			t.Errorf("IsRelease() = %v for %q, want %v", got, tc.v, tc.want)
+		if got := isRelease(tc.v); got != tc.want {
+			t.Errorf("isRelease(%q) = %v, want %v", tc.v, got, tc.want)
 		}
 	}
 }
