@@ -2,7 +2,9 @@ package buildinfo
 
 import "testing"
 
-func TestVersionIsNeverEmpty(t *testing.T) {
+// The fallback is the whole point: callers print this string, and a build with
+// no recorded version must still say something.
+func TestVersionFallsBackWhenTheBuildRecordsNothing(t *testing.T) {
 	if got := Version(); got == "" {
 		t.Fatal("Version() = \"\", want a non-empty fallback")
 	}

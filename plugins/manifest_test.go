@@ -11,17 +11,25 @@ import (
 	"testing"
 )
 
-func manifests(t *testing.T) []string {
+// globPlugins walks the plugin tree rather than naming postgres: the five
+// remaining sources are clones of it, and a test that names one covers one.
+func globPlugins(t *testing.T, pattern, what string) []string {
 	t.Helper()
 
-	paths, err := filepath.Glob("*/.claude-plugin/plugin.json")
+	paths, err := filepath.Glob(pattern)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(paths) == 0 {
-		t.Fatal("no plugin manifest found next to this test")
+		t.Fatalf("no plugin %s found next to this test", what)
 	}
 	return paths
+}
+
+func manifests(t *testing.T) []string {
+	t.Helper()
+
+	return globPlugins(t, "*/.claude-plugin/plugin.json", "manifest")
 }
 
 func manifestVersion(t *testing.T, path string) string {

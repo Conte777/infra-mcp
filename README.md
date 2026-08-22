@@ -58,7 +58,7 @@ second profile plus your own entry — the launcher inside the plugin moves with
 every update, so install the binary yourself for a stable path:
 
 ```sh
-go install github.com/Conte777/infra-mcp/cmd/infra-mcp-postgres@v0.1.0
+go install github.com/Conte777/infra-mcp/cmd/infra-mcp-postgres@latest
 infra-mcp-postgres --profile stage --init
 claude mcp add postgres-stage -- infra-mcp-postgres --profile stage
 ```

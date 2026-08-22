@@ -4,7 +4,8 @@ name: release
 # merging the version bump is the whole release. Triggered by ci rather than by
 # push, so the tag can only ever land on a commit whose matrix went green — and
 # `workflow_run` has no path filter, hence the idempotent check below instead of
-# "did plugin.json change".
+# "did plugin.json change". Recovering a release that never ran is re-running
+# that ci run from the Actions UI: it fires this workflow again.
 on:
   workflow_run:
     workflows: [ci]
@@ -19,7 +20,14 @@ concurrency:
 
 jobs:
   tag:
-    if: github.event.workflow_run.conclusion == 'success'
+    # `branches` above filters workflow_run's head_branch, which for a pull
+    # request is the *head* — a fork whose default branch is main produces a ci
+    # run matching it. Without the two guards below, that fork's manifest would
+    # be tagged onto this repository, and a pushed tag cannot be taken back.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -32,8 +40,13 @@ jobs:
       - name: Tag the manifest version
         run: |
           version=$(jq -r .version plugins/*/.claude-plugin/plugin.json | sort -u)
-          if [ "$(printf '%s' "$version" | wc -l)" -ne 0 ] || [ -z "$version" ]; then
-            echo "plugin manifests carry no single version: $version" >&2
+          # One line, and shaped like a tag: jq prints "null" for a manifest
+          # without the key, which would otherwise be pushed as `vnull`. The
+          # same rule lives in plugins/manifest_test.go, which reddens ci first;
+          # this is the last check before an irreversible push.
+          if [ "$(printf '%s' "$version" | wc -l)" -ne 0 ] ||
+             ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "plugin manifests carry no single tag-shaped version: $version" >&2
             exit 1
           fi
 

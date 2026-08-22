@@ -79,19 +79,18 @@ func (e *launcherEnv) goArgs() string {
 	return string(raw)
 }
 
-// launchers walks the plugin tree rather than naming postgres: the five
-// remaining sources are clones of it, and a test that names one covers one.
 func launchers(t *testing.T) []string {
 	t.Helper()
 
-	paths, err := filepath.Glob("*/bin/infra-mcp-*")
-	if err != nil {
-		t.Fatal(err)
+	return globPlugins(t, "*/bin/infra-mcp-*", "launcher")
+}
+
+func eachLauncher(t *testing.T, fn func(t *testing.T, launcher string)) {
+	t.Helper()
+
+	for _, launcher := range launchers(t) {
+		t.Run(launcher, func(t *testing.T) { fn(t, launcher) })
 	}
-	if len(paths) == 0 {
-		t.Fatal("no plugin launcher found next to this test")
-	}
-	return paths
 }
 
 func manifestOf(t *testing.T, launcher string) string {
@@ -101,76 +100,70 @@ func manifestOf(t *testing.T, launcher string) string {
 }
 
 func TestLauncherBuildsTheVersionFromTheManifest(t *testing.T) {
-	for _, launcher := range launchers(t) {
-		t.Run(launcher, func(t *testing.T) {
-			name := filepath.Base(launcher)
-			want := "github.com/Conte777/infra-mcp/cmd/" + name + "@v" + manifestVersion(t, manifestOf(t, launcher))
+	eachLauncher(t, func(t *testing.T, launcher string) {
+		name := filepath.Base(launcher)
+		want := "github.com/Conte777/infra-mcp/cmd/" + name + "@v" + manifestVersion(t, manifestOf(t, launcher))
 
-			env := newLauncherEnv(t)
-			out, err := env.run("./"+launcher, "--version")
-			if err != nil {
-				t.Fatalf("launcher: %v\n%s", err, out)
-			}
+		env := newLauncherEnv(t)
+		out, err := env.run("./"+launcher, "--version")
+		if err != nil {
+			t.Fatalf("launcher: %v\n%s", err, out)
+		}
 
-			if got := env.goArgs(); !strings.Contains(got, want) {
-				t.Errorf("go install package = %q, want it to contain %q", got, want)
-			}
-			if !strings.Contains(out, "stub binary: --version") {
-				t.Errorf("output = %q, want the built binary to have been exec'd with the arguments", out)
-			}
-		})
-	}
+		if got := env.goArgs(); !strings.Contains(got, want) {
+			t.Errorf("go install package = %q, want it to contain %q", got, want)
+		}
+		if !strings.Contains(out, "stub binary: --version") {
+			t.Errorf("output = %q, want the built binary to have been exec'd with the arguments", out)
+		}
+	})
 }
 
 func TestLauncherEvictsPreviousVersions(t *testing.T) {
-	for _, launcher := range launchers(t) {
-		t.Run(launcher, func(t *testing.T) {
-			name := filepath.Base(launcher)
-			version := "v" + manifestVersion(t, manifestOf(t, launcher))
+	eachLauncher(t, func(t *testing.T, launcher string) {
+		name := filepath.Base(launcher)
+		version := "v" + manifestVersion(t, manifestOf(t, launcher))
 
-			env := newLauncherEnv(t)
-			stale := filepath.Join(env.cache, "infra-mcp", name, "v0.0.1")
-			if err := os.MkdirAll(stale, 0o755); err != nil {
-				t.Fatal(err)
-			}
+		env := newLauncherEnv(t)
+		stale := filepath.Join(env.cache, "infra-mcp", name, "v0.0.1")
+		if err := os.MkdirAll(stale, 0o755); err != nil {
+			t.Fatal(err)
+		}
 
-			if out, err := env.run("./" + launcher); err != nil {
-				t.Fatalf("launcher: %v\n%s", err, out)
-			}
+		if out, err := env.run("./" + launcher); err != nil {
+			t.Fatalf("launcher: %v\n%s", err, out)
+		}
 
-			entries, err := os.ReadDir(filepath.Join(env.cache, "infra-mcp", name))
-			if err != nil {
-				t.Fatal(err)
-			}
-			var left []string
-			for _, e := range entries {
-				left = append(left, e.Name())
-			}
-			if len(left) != 1 || left[0] != version {
-				t.Errorf("cache holds %v, want only %q", left, version)
-			}
-		})
-	}
+		entries, err := os.ReadDir(filepath.Join(env.cache, "infra-mcp", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var left []string
+		for _, e := range entries {
+			left = append(left, e.Name())
+		}
+		if len(left) != 1 || left[0] != version {
+			t.Errorf("cache holds %v, want only %q", left, version)
+		}
+	})
 }
 
 func TestLauncherWrapsABuildFailure(t *testing.T) {
-	for _, launcher := range launchers(t) {
-		t.Run(launcher, func(t *testing.T) {
-			env := newLauncherEnv(t)
-			env.fail = true
+	eachLauncher(t, func(t *testing.T, launcher string) {
+		env := newLauncherEnv(t)
+		env.fail = true
 
-			out, err := env.run("./" + launcher)
-			if err == nil {
-				t.Fatalf("launcher exited 0 on a failed build\n%s", out)
-			}
-			if !strings.Contains(out, "unknown revision") {
-				t.Errorf("output = %q, want the toolchain's own error kept", out)
-			}
-			if !strings.Contains(out, "not published yet") {
-				t.Errorf("output = %q, want the unpublished-release hint", out)
-			}
-		})
-	}
+		out, err := env.run("./" + launcher)
+		if err == nil {
+			t.Fatalf("launcher exited 0 on a failed build\n%s", out)
+		}
+		if !strings.Contains(out, "unknown revision") {
+			t.Errorf("output = %q, want the toolchain's own error kept", out)
+		}
+		if !strings.Contains(out, "not published yet") {
+			t.Errorf("output = %q, want the unpublished-release hint", out)
+		}
+	})
 }
 
 func TestLauncherRejectsAManifestWithoutAVersion(t *testing.T) {
