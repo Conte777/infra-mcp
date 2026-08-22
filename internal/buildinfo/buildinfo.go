@@ -7,7 +7,9 @@ import (
 	"strings"
 )
 
-// version is stamped at release time via -ldflags; empty in a plain `go build`.
+// version is the hook a release build stamps with -ldflags. Nothing stamps it
+// today — the plugin installs through `go install …@<tag>`, where the toolchain
+// records the tag itself — so it is empty in every build we currently produce.
 var version string
 
 // Version returns the stamped version, falling back to the module version the

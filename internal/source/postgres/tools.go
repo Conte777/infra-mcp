@@ -17,9 +17,9 @@ const (
 // repeated in them: it lives in list_databases alone (ADR-0001).
 const (
 	descListDatabases = "List the databases this server may reach, with their size and whether connections are allowed."
-	descListTables    = "List the tables, views and materialized views of one database, with estimated row counts and total size. Partitions of a partitioned table are left out."
+	descListTables    = "List the tables, views, materialized views and foreign tables of one database, with estimated row counts and total size. Partitions of a partitioned table are left out."
 	descDescribeTable = "Show one or more tables in CREATE TABLE form: columns, defaults, keys, indexes, checks, comments, and the foreign keys pointing back at them. Written to be read, not executed."
-	descQuery         = "Run one read-only statement (SELECT, WITH, TABLE, VALUES, SHOW) and return its rows. Narrow with WHERE and LIMIT: the answer is cut to a configured budget that no argument raises."
+	descQuery         = "Run one read-only statement (SELECT, WITH, TABLE, VALUES, SHOW, EXPLAIN) and return its rows. Narrow with WHERE and LIMIT: the answer is cut to a configured budget that no argument raises."
 	descExplain       = "Show the query plan for one read-only statement."
 	descExecute       = "Run statements that change the database. All of them run in one transaction, committed only if every one succeeds, so do not write BEGIN or COMMIT."
 )
