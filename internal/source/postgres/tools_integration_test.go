@@ -290,6 +290,36 @@ func TestQueryRefusesAWriteBeforeItReachesTheServer(t *testing.T) {
 	wantKind(t, err, mcpsrv.KindDenied)
 }
 
+// The keyword check only reads the first statement, so the READ ONLY transaction
+// is what has to hold — and a COMMIT smuggled into a second statement would end
+// it, leaving the rest to run and commit on its own.
+func TestQueryCannotSmuggleASecondStatement(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE victim (id int)`)
+
+	if _, err := runRead(t, s, cfg, sqlArgs{SQL: "SELECT 1; COMMIT; DROP TABLE victim"}, runQuery); err == nil {
+		t.Error("a read tool ran three statements")
+	}
+
+	const count = "SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'victim'"
+	blocks, err := runRead(t, s, cfg, sqlArgs{SQL: count}, runQuery)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if got := column(t, table(t, blocks), "n"); len(got) != 1 || got[0] != "1" {
+		t.Errorf("victim survived = %v, want [1]: a read tool dropped a table", got)
+	}
+
+	// Refusing every semicolon would cost honest queries this one.
+	blocks, err = runRead(t, s, cfg, sqlArgs{SQL: `SELECT 'a;b' AS s`}, runQuery)
+	if err != nil {
+		t.Fatalf("semicolon inside a literal: %v", err)
+	}
+	if got := column(t, table(t, blocks), "s"); len(got) != 1 || got[0] != "a;b" {
+		t.Errorf("s = %v, want [a;b]", got)
+	}
+}
+
 func TestExplain(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int); INSERT INTO t VALUES (1), (2)`)
@@ -425,6 +455,24 @@ func TestWriteExecuteSaysWhenTheScriptEndedTheTransaction(t *testing.T) {
 	}
 	if got := render(t, cfg, blocks); !strings.Contains(got, "ended the transaction itself") {
 		t.Errorf("a script that committed on its own reads as atomic: %q", got)
+	}
+
+	// The transaction status is 'I' after either, so the notice must not say the
+	// work landed — here it did not.
+	blocks, err = runWrite(t, s, cfg, sqlArgs{SQL: "INSERT INTO t VALUES (2); ROLLBACK"}, execute)
+	if err != nil {
+		t.Fatalf("execute with a rollback: %v", err)
+	}
+	if got := render(t, cfg, blocks); strings.Contains(got, "already committed") {
+		t.Errorf("a rolled back script is reported as committed: %q", got)
+	}
+
+	blocks, err = runRead(t, s, cfg, sqlArgs{SQL: "SELECT count(*) AS n FROM t WHERE id = 2"}, runQuery)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if got := column(t, table(t, blocks), "n"); len(got) != 1 || got[0] != "0" {
+		t.Errorf("rolled back row count = %v, want [0]", got)
 	}
 }
 
