@@ -103,6 +103,26 @@ tasks:
     cmds:
       - "{{.BIN}}/govulncheck ./..."
 
+  version:set:
+    desc: "Set the version in every plugin manifest: task version:set -- 0.2.0"
+    cmds:
+      - |
+        v="{{.CLI_ARGS}}"
+        # the rule plugins/manifest_test.go gates the manifests by; anything
+        # looser lets sed metacharacters through into the expression below
+        if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+          echo "usage: task version:set -- X.Y.Z (no leading v), got \"$v\"" >&2
+          exit 1
+        fi
+        for m in plugins/*/.claude-plugin/plugin.json; do
+          # written back through cat, so the manifest keeps its mode
+          sed 's/\("version"[[:space:]]*:[[:space:]]*\)"[^"]*"/\1"'"$v"'"/' "$m" > "$m.tmp" ||
+            { rm -f "$m.tmp"; echo "sed failed on $m, nothing written" >&2; exit 1; }
+          cat "$m.tmp" > "$m"
+          rm -f "$m.tmp"
+          echo "$m -> $v"
+        done
+
   build:
     desc: Build every server binary into ./bin
     cmds:

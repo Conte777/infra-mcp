@@ -58,7 +58,7 @@ second profile plus your own entry — the launcher inside the plugin moves with
 every update, so install the binary yourself for a stable path:
 
 ```sh
-go install github.com/Conte777/infra-mcp/cmd/infra-mcp-postgres@v0.1.0
+go install github.com/Conte777/infra-mcp/cmd/infra-mcp-postgres@latest
 infra-mcp-postgres --profile stage --init
 claude mcp add postgres-stage -- infra-mcp-postgres --profile stage
 ```
@@ -95,9 +95,12 @@ task         # fmt + lint + unit tests
 
 CI runs the same targets, so a green local run means a green pipeline.
 
-Releasing a source: bump `version` in `plugins/<source>/.claude-plugin/plugin.json`
-and tag that commit `v<version>`. The launcher builds the tag it reads from the
-manifest, so the bump and the tag are the release.
+Releasing a source: bump the version in every plugin manifest — `task
+version:set -- 0.2.0` does it — and merge that to `main`. CI tags the commit
+`v<version>` once its matrix is green, and the launcher builds the tag it reads
+from the manifest. A pushed tag is permanent: the module proxy caches the
+revision it first saw, so a mistake is fixed by the next version, never by
+moving the tag.
 
 ## Layout
 
