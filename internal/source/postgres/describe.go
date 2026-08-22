@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -109,6 +110,16 @@ WHERE inh.inhparent = $1
 ORDER BY 1
 LIMIT $2`
 
+// Its own query, and only on the refusal path: naming the table an index sits
+// on costs a round trip that every ordinary describe would pay for a line it
+// never prints.
+const indexTableSQL = `
+SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+FROM pg_index i
+JOIN pg_class c ON c.oid = i.indrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE i.indexrelid = $1`
+
 // A hard ceiling, not a config key: describe_table takes several names and the
 // budget is one for the whole answer, so five hundred partitions would eat the
 // DDL of the next table. Twenty already show the scheme (ADR-0004).
@@ -159,13 +170,17 @@ func describeOne(ctx context.Context, tx pgx.Tx, name string) (string, error) {
 		(errors.As(err, &pgErr) && (class(pgErr.Code) == "42" || class(pgErr.Code) == "0A")) {
 		return "", &mcpsrv.Failure{
 			Kind:   mcpsrv.KindBadArgument,
-			Detail: fmt.Sprintf("no table, view or materialized view named %q", name),
+			Detail: fmt.Sprintf("no table, view, materialized view, partitioned or foreign table named %q", name),
 			Hint:   "list the tables first, or qualify the name with its schema",
 			Err:    err,
 		}
 	}
 	if err != nil {
 		return "", err
+	}
+
+	if !slices.Contains(describableKinds, rel.kind) {
+		return "", refuseKind(ctx, tx, rel)
 	}
 
 	var b strings.Builder
@@ -238,8 +253,19 @@ func sizeLabel(rel relation) string {
 	return size + " " + across
 }
 
+// Exactly the set listTablesSQL shows (catalog.go): "show me the tables" and
+// "describe this table" answer to one definition of table-like, and a relkind
+// postgres adds later is refused rather than printed as whatever it resembles.
+var describableKinds = []string{"r", "v", "m", "p", "f"}
+
+// kindName names every relkind, describable or not: the headline and the
+// refusal read the same list, so nothing can be a table in one and something
+// else in the other. An unlisted kind is named by its raw letter — it costs
+// nothing and makes the next bug report unambiguous.
 func kindName(relkind string) string {
 	switch relkind {
+	case "r":
+		return "table"
 	case "v":
 		return "view"
 	case "m":
@@ -248,9 +274,48 @@ func kindName(relkind string) string {
 		return "partitioned table"
 	case "f":
 		return "foreign table"
-	default:
-		return "table"
+	case "i", "I":
+		return "index"
+	case "S":
+		return "sequence"
+	case "c":
+		return "composite type"
+	case "t":
+		return "TOAST table"
 	}
+	return "relkind " + relkind
+}
+
+// The refusal is an answer too, and it is paid for in the same tokens as a line
+// of DDL — so it names what the object turned out to be instead of costing a
+// round trip to find out.
+func refuseKind(ctx context.Context, tx pgx.Tx, rel relation) error {
+	kind := kindName(rel.kind)
+	f := &mcpsrv.Failure{
+		Kind:   mcpsrv.KindBadArgument,
+		Detail: oneLine(fmt.Sprintf("%s is %s %s, not a table", rel.name, article(kind), kind)),
+	}
+
+	switch rel.kind {
+	case "S":
+		f.Hint = "its parameters are in pg_sequences"
+	case "i", "I":
+		var table string
+		if err := tx.QueryRow(ctx, indexTableSQL, rel.oid).Scan(&table); err != nil {
+			return err
+		}
+		f.Hint = oneLine(fmt.Sprintf("it indexes %s, whose description already prints it", table))
+	}
+	return f
+}
+
+// "an index" is the only vowel in the set today; spelling the rule out is what
+// keeps the kind added next from reading wrong.
+func article(noun string) string {
+	if strings.ContainsRune("aeiou", rune(noun[0])) {
+		return "an"
+	}
+	return "a"
 }
 
 func writeView(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel relation) error {
@@ -485,8 +550,10 @@ func commentLine(format string, args ...any) string {
 	return ddlLine("-- "+format, args...)
 }
 
-// oneLine belongs to ddlLine alone: sanitising a field at the place it is read
-// is how the last hole was left, so it happens where the line is written.
+// oneLine is called where a line of the answer is written and nowhere else —
+// ddlLine, and the refusal text, which is a line of the answer as much as any
+// DDL is. Sanitising a field at the place it is read is how the last hole was
+// left.
 func oneLine(s string) string {
 	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
 }
