@@ -28,7 +28,8 @@ SELECT c.oid,
             WHEN c.relkind IN ('r','m')
             THEN pg_size_pretty(pg_total_relation_size(c.oid)) END,
        CASE WHEN c.relkind = 'p'
-            THEN (SELECT sum(NULLIF(pt.reltuples, -1)::numeric)::bigint
+            THEN (SELECT CASE WHEN bool_and(pt.reltuples >= 0)
+                              THEN sum(pt.reltuples)::bigint END
                     FROM pg_partition_tree(c.oid) t
                     JOIN pg_class pt ON pt.oid = t.relid
                    WHERE t.isleaf)
@@ -230,10 +231,7 @@ func sizeLabel(rel relation) string {
 		return size
 	}
 
-	across := fmt.Sprintf("across %d partitions", rel.partitions)
-	if rel.partitions == 1 {
-		across = "across 1 partition"
-	}
+	across := "across " + partitionCount(rel.partitions)
 	if size == "" {
 		return across
 	}
@@ -264,7 +262,10 @@ func writeView(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel relation)
 	if rel.kind == "m" {
 		word = "MATERIALIZED VIEW"
 	}
-	fmt.Fprintf(b, "CREATE %s %s AS\n%s\n", word, rel.name, strings.TrimRight(def, "\n"))
+	b.WriteString(ddlLine("CREATE %s %s AS", word, rel.name))
+	// The one multi-line thing here, and the only text not written a line at a
+	// time: it is the view's own SQL, and folding it up would be its own lie.
+	fmt.Fprintf(b, "%s\n", strings.TrimRight(def, "\n"))
 	return nil
 }
 
@@ -282,33 +283,33 @@ func writeTable(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel relation
 	if rel.kind == "f" {
 		word = "FOREIGN TABLE"
 	}
-	fmt.Fprintf(b, "CREATE %s %s (\n", word, rel.name)
+	b.WriteString(ddlLine("CREATE %s %s (", word, rel.name))
 	body := append(cols, constraints...)
 	for i, line := range body {
-		b.WriteString(line.text)
+		text := line.text
 		// The comma belongs between the definition and its comment, so the
 		// separator cannot be part of either.
 		if i < len(body)-1 {
-			b.WriteString(",")
+			text += ","
 		}
 		if line.comment != "" {
-			b.WriteString(" -- ")
-			b.WriteString(line.comment)
+			text += " -- " + line.comment
 		}
-		b.WriteString("\n")
+		b.WriteString(ddlLine("%s", text))
 	}
-	b.WriteString(")")
+
+	tail := ")"
 	if rel.partitionKey != nil {
-		fmt.Fprintf(b, " PARTITION BY %s", *rel.partitionKey)
+		tail += " PARTITION BY " + *rel.partitionKey
 	}
 	if rel.kind == "f" {
 		clause, err := foreignClause(ctx, tx, rel.oid)
 		if err != nil {
 			return err
 		}
-		b.WriteString(clause)
+		tail += clause
 	}
-	b.WriteString(";\n")
+	b.WriteString(ddlLine("%s;", tail))
 	return nil
 }
 
@@ -318,13 +319,12 @@ func foreignClause(ctx context.Context, tx pgx.Tx, oid uint32) (string, error) {
 	if err := tx.QueryRow(ctx, foreignTableSQL, oid).Scan(&server, &options); err != nil {
 		return "", err
 	}
-	return " SERVER " + oneLine(server) + optionList(options), nil
+	return " SERVER " + server + optionList(options), nil
 }
 
 // optionList turns the catalog's "name=value" array into the OPTIONS clause
-// postgres itself takes; the value is a literal, so its quotes double, and it
-// stays on one line for the same reason a comment does — whoever created the
-// foreign table wrote it.
+// postgres itself takes; the value is a literal, so its quotes double. Both
+// halves ride out on a ddlLine, which is where they are folded to one line.
 func optionList(options []string) string {
 	if len(options) == 0 {
 		return ""
@@ -332,7 +332,7 @@ func optionList(options []string) string {
 	parts := make([]string, 0, len(options))
 	for _, option := range options {
 		name, value, _ := strings.Cut(option, "=")
-		parts = append(parts, oneLine(name)+" '"+oneLine(strings.ReplaceAll(value, "'", "''"))+"'")
+		parts = append(parts, name+" '"+strings.ReplaceAll(value, "'", "''")+"'")
 	}
 	return " OPTIONS (" + strings.Join(parts, ", ") + ")"
 }
@@ -379,7 +379,7 @@ func columnLines(ctx context.Context, tx pgx.Tx, oid uint32) ([]bodyLine, error)
 			line.text += " NOT NULL"
 		}
 		if comment != nil {
-			line.comment = oneLine(*comment)
+			line.comment = *comment
 		}
 		lines = append(lines, line)
 	}
@@ -416,8 +416,7 @@ func writeIndexes(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel relati
 		if err := rows.Scan(&def); err != nil {
 			return err
 		}
-		b.WriteString(def)
-		b.WriteString(";\n")
+		b.WriteString(ddlLine("%s;", def))
 	}
 	return rows.Err()
 }
@@ -450,7 +449,7 @@ func writePartitions(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel rel
 	}
 
 	if rest := rel.partitions - listed; rest > 0 {
-		fmt.Fprintf(b, "-- and %d more partitions\n", rest)
+		b.WriteString(commentLine("and %s not listed", partitionCount(rest)))
 	}
 	return nil
 }
@@ -474,16 +473,29 @@ func writeReferences(ctx context.Context, tx pgx.Tx, b *strings.Builder, rel rel
 	return rows.Err()
 }
 
-// commentLine is the only way a "--" line is written: everything on one is a
-// catalog string, and a newline in any of them ends the comment and leaves the
-// rest reading as DDL the catalog never held. A quoted identifier may legally
-// carry one, and quote_ident does not strip it.
-func commentLine(format string, args ...any) string {
-	return "-- " + oneLine(fmt.Sprintf(format, args...)) + "\n"
+// ddlLine is the only way a line of this answer is written, the view body
+// excepted: every line is made of catalog strings, and a newline in any of them
+// forges a line the catalog never held. A quoted identifier may legally carry
+// one, and quote_ident does not strip it.
+func ddlLine(format string, args ...any) string {
+	return oneLine(fmt.Sprintf(format, args...)) + "\n"
 }
 
-// oneLine keeps a comment inside its "--": a newline in it would turn the rest
-// of the comment into DDL.
+func commentLine(format string, args ...any) string {
+	return ddlLine("-- "+format, args...)
+}
+
+// oneLine belongs to ddlLine alone: sanitising a field at the place it is read
+// is how the last hole was left, so it happens where the line is written.
 func oneLine(s string) string {
 	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
+}
+
+// partitionCount says how many parts there are, in one voice for the header and
+// for the tail of the list.
+func partitionCount(n int) string {
+	if n == 1 {
+		return "1 partition"
+	}
+	return fmt.Sprintf("%d partitions", n)
 }
