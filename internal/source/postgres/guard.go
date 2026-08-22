@@ -24,6 +24,13 @@ var denyFunctions = []string{
 	"pg_reload_conf", "pg_rotate_logfile",
 	"lo_import", "lo_export",
 	"dblink", "dblink_exec", "dblink_open", "dblink_send_query",
+	// A session-level advisory lock outlives the rollback and goes back into the
+	// pool held, blocking everyone who takes the same key.
+	"pg_advisory_lock", "pg_advisory_lock_shared",
+	"pg_try_advisory_lock", "pg_try_advisory_lock_shared",
+	// set_config is how a read statement turns off the statement_timeout the
+	// lease just set on it.
+	"set_config",
 }
 
 // guardRead is everything checked before a read statement reaches the server.
@@ -40,7 +47,8 @@ func guardRead(cfg Config, sql string) error {
 			Hint: "a write tool of this server is the only way to change anything",
 		}
 	}
-	if name := deniedCall(cfg, sql); name != "" {
+	scan := scannable(sql)
+	if name := deniedCall(cfg, scan); name != "" {
 		return &mcpsrv.Failure{
 			Kind:   mcpsrv.KindDenied,
 			Detail: fmt.Sprintf("%s() has effects a read-only transaction does not undo, so it is on the deny list", name),
@@ -50,7 +58,7 @@ func guardRead(cfg Config, sql string) error {
 	// COPY cannot start a readable statement and cannot be nested in one, so the
 	// keyword check above already blocks it; the second lock is here because the
 	// deny list is meant to hold on its own (ADR-0001).
-	if copiesToProgram(sql) {
+	if copiesToProgram(scan) {
 		return &mcpsrv.Failure{
 			Kind:   mcpsrv.KindDenied,
 			Detail: "COPY … TO/FROM PROGRAM runs a shell command on the database server",
@@ -107,10 +115,42 @@ func skipBlockComment(s string) int {
 	return min(i, len(s))
 }
 
-func deniedCall(cfg Config, sql string) string {
-	lower := strings.ToLower(sql)
+// scannable is the statement as the deny list must read it: lowercased, with
+// comments replaced by a space and quoting marks dropped, because
+// pg_read_file/**/() and "pg_read_file"() are both calls to it. A comment
+// becomes a space rather than nothing — postgres ends the identifier there too.
+func scannable(sql string) string {
+	var b strings.Builder
+	b.Grow(len(sql))
+	for i := 0; i < len(sql); {
+		switch {
+		case strings.HasPrefix(sql[i:], "--"):
+			j := strings.IndexByte(sql[i:], '\n')
+			if j < 0 {
+				i = len(sql)
+			} else {
+				i += j
+			}
+			b.WriteByte(' ')
+		case strings.HasPrefix(sql[i:], "/*"):
+			i += skipBlockComment(sql[i:])
+			b.WriteByte(' ')
+		case sql[i] == '"':
+			i++
+		default:
+			b.WriteByte(sql[i])
+			i++
+		}
+	}
+	return strings.ToLower(b.String())
+}
+
+// String literals are left in on purpose: a name matched inside one costs a
+// refusal on a legitimate query, while skipping the literal would let a call
+// hide behind a quote.
+func deniedCall(cfg Config, scan string) string {
 	for _, name := range slices.Concat(denyFunctions, cfg.Tools.Read.ExtraDenyFunctions) {
-		if calls(lower, strings.ToLower(strings.TrimSpace(name))) {
+		if calls(scan, strings.ToLower(strings.TrimSpace(name))) {
 			return name
 		}
 	}
@@ -142,8 +182,8 @@ func calls(sql, name string) bool {
 	return false
 }
 
-func copiesToProgram(sql string) bool {
-	fields := strings.Fields(strings.ToLower(sql))
+func copiesToProgram(scan string) bool {
+	fields := strings.Fields(scan)
 	if !slices.Contains(fields, "copy") || !slices.Contains(fields, "program") {
 		return false
 	}

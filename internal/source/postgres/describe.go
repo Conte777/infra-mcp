@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Conte777/infra-mcp/internal/mcpsrv"
 	"github.com/Conte777/infra-mcp/internal/mcpsrv/block"
@@ -100,11 +101,18 @@ func describeOne(ctx context.Context, tx pgx.Tx, name string) (string, error) {
 	var rel relation
 	err := tx.QueryRow(ctx, relationSQL, name).Scan(&rel.oid, &rel.name, &rel.kind,
 		&rel.comment, &rel.size, &rel.rows, &rel.partitionKey, &rel.partitions)
-	if errors.Is(err, pgx.ErrNoRows) {
+	// to_regclass answers NULL for a name that matches nothing, but raises for
+	// one that is not a name at all: "" is a syntax error (42), and the
+	// db.schema.table a model reaches for when it qualifies too far is an
+	// unimplemented cross-database reference (0A). All three are one mistake.
+	var pgErr *pgconn.PgError
+	if errors.Is(err, pgx.ErrNoRows) ||
+		(errors.As(err, &pgErr) && (class(pgErr.Code) == "42" || class(pgErr.Code) == "0A")) {
 		return "", &mcpsrv.Failure{
 			Kind:   mcpsrv.KindBadArgument,
 			Detail: fmt.Sprintf("no table, view or materialized view named %q", name),
 			Hint:   "list the tables first, or qualify the name with its schema",
+			Err:    err,
 		}
 	}
 	if err != nil {

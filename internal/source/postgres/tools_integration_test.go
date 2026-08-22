@@ -371,6 +371,74 @@ func TestWriteExecuteRollsBackTheWholeScript(t *testing.T) {
 	}
 }
 
+// A result that errors in the middle leaves the connection locked until the
+// protocol is read to its end; the rollback would then fail too, and the pool
+// would throw the connection away on every failed script.
+func TestFailedWriteScriptKeepsItsConnection(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int)`)
+
+	run := func(sql string) error {
+		_, err := runWrite(t, s, cfg, sqlArgs{SQL: sql}, execute)
+		return err
+	}
+	if err := run("INSERT INTO t VALUES (1)"); err != nil {
+		t.Fatalf("warm-up: %v", err)
+	}
+
+	pool, release, err := s.pools.acquire(t.Context(), cfg.Databases.Default)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer release()
+	opened := pool.Stat().NewConnsCount()
+
+	if err := run("INSERT INTO t VALUES (2); SELECT 1 / 0"); err == nil {
+		t.Fatal("a division by zero went through")
+	}
+	if err := run("INSERT INTO t VALUES (3)"); err != nil {
+		t.Fatalf("after the failed script: %v", err)
+	}
+
+	if got := pool.Stat().NewConnsCount(); got != opened {
+		t.Errorf("the pool opened %d more connections; the failed script destroyed the one it used", got-opened)
+	}
+}
+
+func TestWriteExecuteRefusesAnEmptyScript(t *testing.T) {
+	s, cfg := testSource(t, nil)
+
+	_, err := runWrite(t, s, cfg, sqlArgs{SQL: "-- nothing to do\n"}, execute)
+
+	wantKind(t, err, mcpsrv.KindBadArgument)
+}
+
+// The tool promises one transaction; a script that commits on its own breaks
+// that, and postgres answers our own commit with nothing but a warning.
+func TestWriteExecuteSaysWhenTheScriptEndedTheTransaction(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int)`)
+
+	blocks, err := runWrite(t, s, cfg, sqlArgs{SQL: "INSERT INTO t VALUES (1); COMMIT"}, execute)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got := render(t, cfg, blocks); !strings.Contains(got, "ended the transaction itself") {
+		t.Errorf("a script that committed on its own reads as atomic: %q", got)
+	}
+}
+
+func TestDescribeMalformedNameIsABadArgument(t *testing.T) {
+	s, cfg := testSource(t, nil)
+
+	for _, name := range []string{"", "app_db.public.orders"} {
+		_, err := runRead(t, s, cfg, describeArgs{Tables: []string{name}}, describeTable)
+		if _, hint := wantKind(t, err, mcpsrv.KindBadArgument); hint == "" {
+			t.Errorf("%q: no hint on what to do instead", name)
+		}
+	}
+}
+
 func contains(all []string, want string) bool {
 	for _, s := range all {
 		if s == want {

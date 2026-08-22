@@ -109,7 +109,12 @@ func explain(ctx context.Context, tx pgx.Tx, cfg Config, in explainArgs) ([]bloc
 // protocol pgx uses for an argument-less Exec, but every statement's command tag
 // and every RETURNING row comes back, not only the last statement's tag.
 func execute(ctx context.Context, tx pgx.Tx, cfg Config, in sqlArgs) ([]block.Block, error) {
-	mrr := tx.Conn().PgConn().Exec(ctx, in.SQL)
+	conn := tx.Conn().PgConn()
+	mrr := conn.Exec(ctx, in.SQL)
+	// Closed on every path, not only the happy one: the connection stays locked
+	// until ReadyForQuery is read, and the rollback that follows a failed script
+	// would then fail as well and take the pooled connection down with it.
+	defer func() { _ = mrr.Close() }()
 
 	var blocks []block.Block
 	var tags []string
@@ -122,13 +127,25 @@ func execute(ctx context.Context, tx pgx.Tx, cfg Config, in sqlArgs) ([]block.Bl
 		if err != nil {
 			return nil, err
 		}
-		tags = append(tags, tag.String())
+		// An empty statement — "" or nothing but a comment — still produces a
+		// result, with no tag on it.
+		if s := tag.String(); s != "" {
+			tags = append(tags, s)
+		}
 	}
 	if err := mrr.Close(); err != nil {
 		return nil, err
 	}
 	if len(tags) == 0 {
 		return nil, &mcpsrv.Failure{Kind: mcpsrv.KindBadArgument, Detail: "no statement to run"}
+	}
+
+	// A COMMIT or ROLLBACK inside the script ends the transaction this tool
+	// opened; postgres answers the commit that follows with a warning, so
+	// nothing else would report that the script was not atomic after all.
+	if conn.TxStatus() != 'T' {
+		blocks = append(blocks, block.Text(
+			"this script ended the transaction itself, so whatever followed ran outside it and is already committed"))
 	}
 	return append(blocks, block.Text(strings.Join(tags, "\n"))), nil
 }
