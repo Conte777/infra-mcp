@@ -31,3 +31,4 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 - **Frontier query**: list the map's open sub-issues (`gh api repos/<owner>/<repo>/issues/<map>/sub_issues --paginate`), drop any with an open blocker or an assignee; first in map order wins.
 - **Claim**: `gh issue edit <n> --add-assignee @me` — the session's first write.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
+- **Ticket that edits code**: before the first edit, follow `code-change-workflow.md` — worktree, then PR, then both reviews, then merge. The PR merges _before_ the Resolve step above, and references the ticket with `Refs #<n>` so it doesn't auto-close ahead of the resolution comment.
