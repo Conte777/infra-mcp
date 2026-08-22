@@ -214,6 +214,169 @@ func TestDescribeView(t *testing.T) {
 	}
 }
 
+// The whole point of the tree sums: a partitioned table's own storage is empty,
+// so the numbers a reader gets have to come from its parts.
+const partitionSchema = `
+	CREATE TABLE events (id int, at date, region text) PARTITION BY RANGE (at);
+	CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+	CREATE TABLE events_2027 PARTITION OF events FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')
+		PARTITION BY LIST (region);
+	CREATE TABLE events_2027_eu PARTITION OF events_2027 FOR VALUES IN ('eu');
+	CREATE TABLE events_rest PARTITION OF events DEFAULT;
+	CREATE INDEX events_2026_at_idx ON events_2026 (at);
+	INSERT INTO events VALUES (1, '2026-05-05', 'eu'), (2, '2026-06-06', 'eu');
+	ANALYZE events_2026;
+	ANALYZE events_2027_eu;
+	ANALYZE events_rest;
+
+	CREATE TABLE big (id int) PARTITION BY LIST (id);
+	DO $$ BEGIN
+		FOR i IN 1..25 LOOP
+			EXECUTE format('CREATE TABLE big_%s PARTITION OF big FOR VALUES IN (%s)', i, i);
+		END LOOP;
+	END $$`
+
+func TestDescribePartitionedTable(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, partitionSchema)
+
+	blocks, err := runRead(t, s, cfg, describeArgs{Tables: []string{"events"}}, describeTable)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	code, _ := blocks[0].(block.Code)
+	ddl := code.Text
+
+	for _, want := range []string{
+		"-- public.events: partitioned table, ~2 rows, ",
+		" across 3 partitions\n",
+		"CREATE TABLE public.events (",
+		") PARTITION BY RANGE (at);",
+		"-- partition public.events_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+		"-- partition public.events_rest DEFAULT",
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Errorf("%q missing from the DDL:\n%s", want, ddl)
+		}
+	}
+	// pg_total_relation_size counts the parent's own storage, which is empty by
+	// definition: a terabyte of partitions used to read as 0 bytes.
+	if strings.Contains(ddl, "0 bytes") {
+		t.Errorf("the size is the parent's own, not the tree's:\n%s", ddl)
+	}
+}
+
+func TestDescribePartition(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, partitionSchema)
+
+	blocks, err := runRead(t, s, cfg,
+		describeArgs{Tables: []string{"events_2026", "events_rest", "events_2027"}}, describeTable)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	leaf, _ := blocks[0].(block.Code)
+	fallback, _ := blocks[1].(block.Code)
+	middle, _ := blocks[2].(block.Code)
+
+	for _, want := range []string{
+		"-- public.events_2026: partition of public.events, ~2 rows, ",
+		"-- FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')\n",
+		// The columns are what describe_table is called for, and the native
+		// PARTITION OF form has no list of them at all.
+		"CREATE TABLE public.events_2026 (\n  id integer",
+		"CREATE INDEX events_2026_at_idx",
+	} {
+		if !strings.Contains(leaf.Text, want) {
+			t.Errorf("%q missing from the partition DDL:\n%s", want, leaf.Text)
+		}
+	}
+	if !strings.Contains(fallback.Text, "-- DEFAULT\n") {
+		t.Errorf("a default partition does not say so:\n%s", fallback.Text)
+	}
+	// A partition that is partitioned itself carries both facts.
+	if !strings.Contains(middle.Text, "-- public.events_2027: partition of public.events, ") ||
+		!strings.Contains(middle.Text, "across 1 partition\n") ||
+		!strings.Contains(middle.Text, ") PARTITION BY LIST (region);") {
+		t.Errorf("a subpartitioned partition is missing one of its two halves:\n%s", middle.Text)
+	}
+}
+
+func TestDescribePartitionListStopsAtTheCeiling(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, partitionSchema)
+
+	blocks, err := runRead(t, s, cfg, describeArgs{Tables: []string{"big"}}, describeTable)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	code, _ := blocks[0].(block.Code)
+
+	if got := strings.Count(code.Text, "-- partition "); got != maxPartitionsListed {
+		t.Errorf("%d partitions listed, want the ceiling of %d:\n%s", got, maxPartitionsListed, code.Text)
+	}
+	if !strings.Contains(code.Text, "-- and 5 more partitions") {
+		t.Errorf("the partitions past the ceiling are not accounted for:\n%s", code.Text)
+	}
+}
+
+// quote_ident doubles quotes and nothing else, so an identifier carrying a
+// newline ends the "--" comment it is printed in and leaves the rest reading as
+// catalog data. Whoever may CREATE TABLE picks that name.
+func TestDescribeCannotBeMadeToForgeALine(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, partitionSchema)
+	exec(t, cfg, cfg.Databases.Default, "CREATE TABLE \"evil\n-- partition public.fake DEFAULT\""+
+		` PARTITION OF events FOR VALUES FROM ('2028-01-01') TO ('2029-01-01')`)
+
+	blocks, err := runRead(t, s, cfg, describeArgs{Tables: []string{"events"}}, describeTable)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	code, _ := blocks[0].(block.Code)
+
+	if strings.Contains(code.Text, "\n-- partition public.fake DEFAULT\n") {
+		t.Errorf("a partition name forged a line of its own:\n%s", code.Text)
+	}
+	if got := strings.Count(code.Text, "\n-- partition "); got != 4 {
+		t.Errorf("%d partition lines for 4 partitions:\n%s", got, code.Text)
+	}
+}
+
+func TestDescribeForeignTable(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default, `
+		CREATE EXTENSION postgres_fdw;
+		CREATE SERVER remote FOREIGN DATA WRAPPER postgres_fdw
+			OPTIONS (host 'elsewhere.internal', port '5432', dbname 'other');
+		CREATE FOREIGN TABLE remote_orders (
+			id int OPTIONS (column_name 'order''id') NOT NULL,
+			total numeric
+		) SERVER remote OPTIONS (schema_name 'public', table_name 'orders')`)
+
+	blocks, err := runRead(t, s, cfg, describeArgs{Tables: []string{"remote_orders"}}, describeTable)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	code, _ := blocks[0].(block.Code)
+
+	for _, want := range []string{
+		"-- public.remote_orders: foreign table",
+		"CREATE FOREIGN TABLE public.remote_orders (",
+		"  id integer OPTIONS (column_name 'order''id') NOT NULL",
+		" SERVER remote OPTIONS (schema_name 'public', table_name 'orders');",
+	} {
+		if !strings.Contains(code.Text, want) {
+			t.Errorf("%q missing from the DDL:\n%s", want, code.Text)
+		}
+	}
+	// The server is an object nobody asked about, and its options are the address
+	// of a system this tool gave no access to.
+	if strings.Contains(code.Text, "elsewhere.internal") {
+		t.Errorf("the foreign server's own options reached the answer:\n%s", code.Text)
+	}
+}
+
 func TestDescribeUnknownTableIsABadArgument(t *testing.T) {
 	s, cfg := testSource(t, nil)
 
