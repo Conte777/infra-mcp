@@ -226,12 +226,14 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (C
 	if err != nil {
 		return fail("no config file found", err)
 	}
+	// Existence, not readability: an unreadable file is still one --init refuses
+	// to overwrite. Resolve returns a --config path whether or not it is there.
+	haveFile = fileExists(path)
 
 	data, err := os.ReadFile(path) //nolint:gosec // the path is the operator's own --config, env or XDG choice
 	if err != nil {
 		return fail("cannot be read", err)
 	}
-	haveFile = true
 
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {

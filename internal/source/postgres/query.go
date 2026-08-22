@@ -28,7 +28,12 @@ func runQuery(ctx context.Context, tx pgx.Tx, cfg Config, in sqlArgs) ([]block.B
 	// timeout fires before the first ones can be shown. SHOW and EXPLAIN cannot
 	// be declared as one, and their answers are small anyway.
 	if limit > 0 && cursorable(sql) {
-		if _, err := tx.Exec(ctx, "DECLARE "+cursorName+" NO SCROLL CURSOR FOR "+sql); err != nil {
+		// Not tx.Exec: pgx forces the simple protocol on an argument-less Exec,
+		// where "SELECT 1; COMMIT; DROP TABLE t" is three statements and the
+		// COMMIT ends the READ ONLY transaction. ExecParams carries one statement
+		// by protocol, so postgres refuses the tail itself.
+		decl := "DECLARE " + cursorName + " NO SCROLL CURSOR FOR " + sql
+		if _, err := tx.Conn().PgConn().ExecParams(ctx, decl, nil, nil, nil, nil).Close(); err != nil {
 			return nil, err
 		}
 		// One row past the budget, so that "there is more" is a fact and not a guess.
@@ -142,10 +147,13 @@ func execute(ctx context.Context, tx pgx.Tx, cfg Config, in sqlArgs) ([]block.Bl
 
 	// A COMMIT or ROLLBACK inside the script ends the transaction this tool
 	// opened; postgres answers the commit that follows with a warning, so
-	// nothing else would report that the script was not atomic after all.
+	// nothing else would report that the script was not atomic after all. The
+	// status cannot tell the two apart — both leave 'I' — so the notice must not
+	// claim the work landed.
 	if conn.TxStatus() != 'T' {
 		blocks = append(blocks, block.Text(
-			"this script ended the transaction itself, so whatever followed ran outside it and is already committed"))
+			"this script ended the transaction itself: everything before that COMMIT or ROLLBACK was decided by it, "+
+				"and everything after ran outside the transaction and committed on its own"))
 	}
 	return append(blocks, block.Text(strings.Join(tags, "\n"))), nil
 }

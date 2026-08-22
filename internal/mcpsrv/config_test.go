@@ -302,6 +302,29 @@ func TestLoadHintsAtTheSchemaWhenTheFileExists(t *testing.T) {
 	}
 }
 
+// Unreadable is still a file --init will not overwrite, so it takes the same
+// hint as a file we could read and could not use.
+func TestLoadHintsAtTheSchemaWhenTheFileCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 file")
+	}
+	path := filepath.Join(t.TempDir(), "test.default.json")
+	writeFile(t, path, `{}`)
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	loc := Location{Source: "test", Profile: "default", Flag: path}
+
+	_, err := Load(loc, testConfig{}, nil)
+	var cerr *ConfigError
+	if !errors.As(err, &cerr) {
+		t.Fatalf("Load error = %v, want a *ConfigError", err)
+	}
+	if cerr.Hint != schemaHint {
+		t.Errorf("Hint = %q, want %q", cerr.Hint, schemaHint)
+	}
+}
+
 func writeFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

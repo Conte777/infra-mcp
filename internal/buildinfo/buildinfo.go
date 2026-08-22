@@ -33,5 +33,9 @@ var pseudoVersion = regexp.MustCompile(`[-.]\d{14}-[0-9a-f]{12}$`)
 // A pseudo-version does not, so a URL built from one resolves to nothing.
 func IsRelease() bool {
 	v := Version()
-	return strings.HasPrefix(v, "v") && !pseudoVersion.MatchString(v)
+	// "+dirty" is stamped when the tree has uncommitted changes: no such ref,
+	// and the config types may no longer match the tag's schema anyway.
+	return strings.HasPrefix(v, "v") &&
+		!strings.Contains(v, "+") &&
+		!pseudoVersion.MatchString(v)
 }
