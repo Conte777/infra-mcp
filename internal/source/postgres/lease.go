@@ -16,21 +16,37 @@ import (
 )
 
 // Input is what every tool's argument struct satisfies. The wrapper resolves
-// the database before the handler runs, so which database a call reaches is
-// never the handler's decision.
-type Input interface{ database() string }
+// the address before the handler runs, so which cluster and which database a
+// call reaches is never the handler's decision.
+type Input interface {
+	mcpsrv.Addressed
+	// cluster is the same value the core reads through [mcpsrv.Addressed],
+	// whose accessor is unexported to this package; it comes off the embedded
+	// field instead.
+	cluster() mcpsrv.Address
+	database() string
+}
 
-// Args is the database argument every tool carries (ADR-0001). The field is
-// required: with no omitzero the core's schema marks it so.
+// Args is what every tool carries: the cluster the core addresses, and the
+// database inside it (ADR-0001). Neither is omitzero, so the core's schema
+// marks all three required.
 type Args struct {
+	mcpsrv.Address
+
 	Database string `json:"database" jsonschema:"database to run in"`
 }
 
+func (a Args) cluster() mcpsrv.Address { return a.Address }
+
 func (a Args) database() string { return a.Database }
 
-// ConnectionArgs is for a tool that asks about the connection as a whole rather
-// than about one database; it runs in databases.default.
-type ConnectionArgs struct{}
+// ConnectionArgs is for a tool that asks about a cluster as a whole rather than
+// about one database; it runs in that cluster's databases.default.
+type ConnectionArgs struct {
+	mcpsrv.Address
+}
+
+func (a ConnectionArgs) cluster() mcpsrv.Address { return a.Address }
 
 func (ConnectionArgs) database() string { return "" }
 
@@ -70,11 +86,12 @@ func inTx[In Input](s *Source, mode pgx.TxAccessMode, h TxFunc[In]) mcpsrv.Handl
 		if err != nil {
 			return nil, err
 		}
+		addr := address{cluster: in.cluster(), database: db}
 
 		ctx, cancel := context.WithTimeout(ctx, cfg.ClientDeadline())
 		defer cancel()
 
-		pool, release, err := s.pools.acquire(ctx, db)
+		pool, release, err := s.pools.acquire(ctx, cfg, addr)
 		if err != nil {
 			return nil, failure(ctx, cfg, err)
 		}
@@ -87,7 +104,7 @@ func inTx[In Input](s *Source, mode pgx.TxAccessMode, h TxFunc[In]) mcpsrv.Handl
 			// database name would otherwise push a working pool out.
 			var connErr *pgconn.ConnectError
 			if errors.As(err, &connErr) {
-				s.pools.forget(db)
+				s.pools.forget(addr)
 			}
 			return nil, failure(ctx, cfg, err)
 		}

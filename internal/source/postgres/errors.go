@@ -47,7 +47,7 @@ func failure(ctx context.Context, cfg Config, err error) error {
 	if errors.As(err, &connErr) {
 		return &mcpsrv.Failure{
 			Kind:   mcpsrv.KindUnavailable,
-			Detail: fmt.Sprintf("cannot reach postgres at %s: %v", address(cfg.Connection), cause(connErr)),
+			Detail: fmt.Sprintf("cannot reach postgres at %s: %v", hostPort(cfg.Connection), cause(connErr)),
 			Err:    err,
 		}
 	}
@@ -132,7 +132,7 @@ func class(code string) string {
 	return code[:2]
 }
 
-func address(c Connection) string {
+func hostPort(c Connection) string {
 	if c.Port > 0 {
 		return fmt.Sprintf("%s:%d", c.Host, c.Port)
 	}

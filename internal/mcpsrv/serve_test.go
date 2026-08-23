@@ -49,7 +49,7 @@ func TestServeListenerStopsOnTheSignal(t *testing.T) {
 	}
 
 	spec := testSpec()
-	server := Build(spec, NewRuntime(spec.Defaults, nil, testEnv(), nil))
+	server := Build(spec, NewRuntime(testInventory(), nil, testProcess(), nil))
 	ctx, cancel := context.WithCancel(t.Context())
 
 	ended := make(chan error, 1)

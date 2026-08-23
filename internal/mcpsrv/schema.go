@@ -2,6 +2,7 @@ package mcpsrv
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"reflect"
@@ -34,8 +35,46 @@ func Schema[C any](types TypeSchemas) (*jsonschema.Schema, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := spliceEnvironmentLevel(s); err != nil {
+		return nil, err
+	}
 	s.Schema = metaSchema
 	return s, nil
+}
+
+// spliceEnvironmentLevel gives the environment level the source's cluster keys.
+// The generator cannot: [Environment] declares the clusters map and nothing of
+// what a level carries, because Go has no way to embed a type parameter. The
+// keys are copied off the cluster schema the generator did build, so the core
+// still names no field of any source.
+func spliceEnvironmentLevel(s *jsonschema.Schema) error {
+	env, err := mapValue(s, keyEnvironments)
+	if err != nil {
+		return err
+	}
+	cluster, err := mapValue(env, keyClusters)
+	if err != nil {
+		return err
+	}
+	for name, prop := range cluster.Properties {
+		if _, taken := env.Properties[name]; taken {
+			return fmt.Errorf("the cluster config declares %q, which the core owns at the environment level", name)
+		}
+		// A copy, not the same pointer: a resolved schema has to be a tree.
+		env.Properties[name] = prop.CloneSchemas()
+	}
+	env.PropertyOrder = append(env.PropertyOrder, cluster.PropertyOrder...)
+	return nil
+}
+
+// mapValue is the schema of what property key holds, key being a map: the one
+// place the three levels of the config are wired together.
+func mapValue(s *jsonschema.Schema, key string) (*jsonschema.Schema, error) {
+	prop := s.Properties[key]
+	if prop == nil || prop.AdditionalProperties == nil {
+		return nil, fmt.Errorf("%q is not a map of names in the generated schema; the config type does not embed mcpsrv.Common", key)
+	}
+	return prop.AdditionalProperties, nil
 }
 
 // PrintSchema writes the schema for a source config, for editors that will not

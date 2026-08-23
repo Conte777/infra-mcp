@@ -67,7 +67,16 @@ func TestMillis(t *testing.T) {
 
 type leaseArgs struct {
 	Args
+
 	Table string `json:"table"`
+}
+
+// testInventory is the one cluster the fixtures below address.
+func testInventory() mcpsrv.Inventory[Config] {
+	return mcpsrv.Inventory[Config]{
+		Global:   Defaults(),
+		Clusters: []mcpsrv.Cluster[Config]{{Address: testCluster, Config: Defaults()}},
+	}
 }
 
 // The wrappers are the only route into the registry, and the door taken settles
@@ -75,7 +84,7 @@ type leaseArgs struct {
 func TestWrappersNameAndAnnotateByDoor(t *testing.T) {
 	s := &Source{}
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	rt := mcpsrv.NewRuntime[Config, *Config](Defaults(), nil, mcpsrv.Env{}, nil)
+	rt := mcpsrv.NewRuntime[Config, *Config](testInventory(), nil, mcpsrv.Process{}, nil)
 	r := mcpsrv.NewRegistry(server, Prefix, rt)
 
 	nothing := func(context.Context, pgx.Tx, Config, leaseArgs) ([]block.Block, error) { return nil, nil }
@@ -111,13 +120,13 @@ func TestWrappersNameAndAnnotateByDoor(t *testing.T) {
 // A pool that never reached the server holds a cache slot for nothing, and a
 // model walking wrong database names would push the working one out.
 func TestLeaseForgetsAPoolThatNeverConnected(t *testing.T) {
-	p := testPools(t, 4, time.Minute)
+	p, cfg := testPools(t, 4, time.Minute)
 	s := &Source{pools: p}
 
 	_, err := inTx(s, pgx.ReadOnly, func(context.Context, pgx.Tx, Config, ConnectionArgs) ([]block.Block, error) {
 		t.Fatal("the handler must not run without a connection")
 		return nil, nil
-	})(context.Background(), p.cfg, ConnectionArgs{})
+	})(context.Background(), cfg, ConnectionArgs{Address: testCluster})
 
 	var f *mcpsrv.Failure
 	if !errors.As(err, &f) || f.Kind != mcpsrv.KindUnavailable {
@@ -134,7 +143,7 @@ func TestToolsReplacesAnEarlierPoolCache(t *testing.T) {
 	s := &Source{}
 	build := func() {
 		server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-		rt := mcpsrv.NewRuntime[Config, *Config](Defaults(), nil, mcpsrv.Env{}, nil)
+		rt := mcpsrv.NewRuntime[Config, *Config](testInventory(), nil, mcpsrv.Process{}, nil)
 		s.Tools(mcpsrv.NewRegistry(server, Prefix, rt))
 	}
 
@@ -145,7 +154,7 @@ func TestToolsReplacesAnEarlierPoolCache(t *testing.T) {
 	if s.pools == first {
 		t.Fatal("the second build kept the first cache")
 	}
-	if _, _, err := first.acquire(context.Background(), "app_db"); !errors.Is(err, errPoolsClosed) {
+	if _, _, err := first.acquire(context.Background(), Defaults(), at("app_db")); !errors.Is(err, errPoolsClosed) {
 		t.Errorf("the first cache is still open: %v", err)
 	}
 }
@@ -158,7 +167,7 @@ func TestHandlerWithoutPools(t *testing.T) {
 		return nil, nil
 	})
 
-	_, err := h(context.Background(), Defaults(), leaseArgs{})
+	_, err := h(context.Background(), Defaults(), leaseArgs{Args: Args{Address: testCluster}})
 
 	var f *mcpsrv.Failure
 	if !errors.As(err, &f) || f.Kind != mcpsrv.KindNotConfigured {

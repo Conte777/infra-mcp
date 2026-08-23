@@ -21,7 +21,16 @@ var update = flag.Bool("update", false, "rewrite the committed schema instead of
 // the gate that keeps it in step with the Go type.
 const schemaFile = "../../../schema/postgres.schema.json"
 
-const validConfig = `{
+// devMain is the address the fixtures below declare.
+var devMain = mcpsrv.Address{Environment: "dev", Cluster: "main"}
+
+// oneCluster frames a cluster body as a whole config file: everything above the
+// cluster is the shortest thing that declares an address to reach.
+func oneCluster(body string) string {
+	return `{"environments":{"dev":{"clusters":{"main":` + body + `}}}}`
+}
+
+const validCluster = `{
   "connection": {"host": "db.example.com", "user": "app", "password": "${INFRA_MCP_TEST_PASSWORD}"},
   "databases": {"default": "app_db"}
 }`
@@ -50,12 +59,8 @@ func TestSchemaMatchesCommittedFile(t *testing.T) {
 
 func TestLoadAppliesFileOnTopOfDefaults(t *testing.T) {
 	t.Setenv("INFRA_MCP_TEST_PASSWORD", "secret")
-	loc := configAt(t, validConfig)
 
-	cfg, err := mcpsrv.Load(loc, postgres.Defaults(), postgres.ConfigTypes())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	cfg := mustLoad(t, oneCluster(validCluster)).Config
 
 	if cfg.Connection.Password != "secret" {
 		t.Errorf("password = %q, want the expanded value", cfg.Connection.Password)
@@ -77,20 +82,106 @@ func TestLoadAppliesFileOnTopOfDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadKeepsAnExplicitFalse(t *testing.T) {
+// The three levels are the point of the file: what a cluster does not say it
+// takes from its environment, and what neither says from the global level.
+func TestLoadInheritsDownTheLevels(t *testing.T) {
 	t.Setenv("INFRA_MCP_TEST_PASSWORD", "secret")
-	loc := configAt(t, `{
-	  "connection": {"host": "h", "user": "u", "password": "${INFRA_MCP_TEST_PASSWORD}"},
-	  "databases": {"default": "d"},
-	  "tools": {"write": {"requireConfirmation": false}}
+	inv := load(t, `{
+	  "connection": {"user": "app", "password": "${INFRA_MCP_TEST_PASSWORD}"},
+	  "environments": {
+	    "dev": {
+	      "connection": {"host": "dev.example.com"},
+	      "clusters": {
+	        "main":     {"databases": {"default": "app_db"}},
+	        "reporting": {"connection": {"host": "reports.example.com"}, "databases": {"default": "reports"}}
+	      }
+	    }
+	  }
 	}`)
 
-	cfg, err := mcpsrv.Load(loc, postgres.Defaults(), postgres.ConfigTypes())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	if len(inv.Clusters) != 2 {
+		t.Fatalf("loaded %d clusters, want 2", len(inv.Clusters))
 	}
-	if cfg.Tools.Write.RequireConfirmation {
+	main := find(t, inv, devMain)
+	if main.Connection.Host != "dev.example.com" {
+		t.Errorf("dev/main host = %q, want the environment's", main.Connection.Host)
+	}
+	if main.Connection.User != "app" {
+		t.Errorf("dev/main user = %q, want the global one", main.Connection.User)
+	}
+
+	reporting := find(t, inv, mcpsrv.Address{Environment: "dev", Cluster: "reporting"})
+	if reporting.Connection.Host != "reports.example.com" {
+		t.Errorf("dev/reporting host = %q, want its own", reporting.Connection.Host)
+	}
+	if reporting.Connection.User != "app" {
+		t.Errorf("dev/reporting user = %q, want the global one", reporting.Connection.User)
+	}
+}
+
+// readOnly inherits like everything else, and a cluster may take it back: an
+// environment marked read-only with one writable cluster in it is a config
+// somebody will write.
+func TestLoadInheritsReadOnly(t *testing.T) {
+	t.Setenv("INFRA_MCP_TEST_PASSWORD", "secret")
+	inv := load(t, `{
+	  "connection": {"host": "h", "user": "u", "password": "${INFRA_MCP_TEST_PASSWORD}"},
+	  "databases": {"default": "d"},
+	  "environments": {
+	    "prod": {
+	      "readOnly": true,
+	      "clusters": {"main": {}, "sandbox": {"readOnly": false}}
+	    }
+	  }
+	}`)
+
+	for _, tc := range []struct {
+		cluster string
+		want    bool
+	}{
+		{"main", true},
+		{"sandbox", false},
+	} {
+		addr := mcpsrv.Address{Environment: "prod", Cluster: tc.cluster}
+		cluster, err := inv.Find(addr)
+		if err != nil {
+			t.Fatalf("Find(%s): %v", addr, err)
+		}
+		if cluster.ReadOnly != tc.want {
+			t.Errorf("%s readOnly = %v, want %v", addr, cluster.ReadOnly, tc.want)
+		}
+	}
+}
+
+func TestLoadKeepsAnExplicitFalse(t *testing.T) {
+	t.Setenv("INFRA_MCP_TEST_PASSWORD", "secret")
+	inv := load(t, `{
+	  "tools": {"write": {"requireConfirmation": false}},
+	  "environments": {"dev": {"clusters": {"main": `+validCluster+`}}}
+	}`)
+
+	if inv.Global.Tools.Write.RequireConfirmation {
 		t.Error("an explicit false was overridden by the default true")
+	}
+}
+
+// A 0.1 file is recognised by what it lacks, before the schema gets to answer
+// it with a heap of unknown-key complaints that never say what replaced them.
+func TestLoadExplainsTheOldShape(t *testing.T) {
+	loc := configAt(t, `{
+	  "connection": {"host": "h", "user": "u", "password": "${INFRA_MCP_TEST_PASSWORD}"},
+	  "databases": {"default": "d"}
+	}`)
+
+	_, err := mcpsrv.Load(loc, postgres.Defaults(), postgres.ConfigTypes())
+	var cerr *mcpsrv.ConfigError
+	if !errors.As(err, &cerr) {
+		t.Fatalf("Load error = %v, want a *mcpsrv.ConfigError", err)
+	}
+	for _, want := range []string{"environments", "clusters"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }
 
@@ -102,47 +193,57 @@ func TestLoadRejects(t *testing.T) {
 	}{
 		{
 			name:   "unknown key",
-			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"output":{"maxRow":10}}`,
+			body:   `{"output":{"maxRow":10},"environments":{"dev":{"clusters":{"main":` + validCluster + `}}}}`,
 			reason: "maxRow",
 		},
 		{
-			name:   "missing required key",
-			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"}}`,
-			reason: "databases",
+			name:   "a global key inside a cluster",
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"output":{"maxRows":10}}`),
+			reason: "output",
+		},
+		{
+			name:   "an environment with no clusters",
+			body:   `{"environments":{"dev":{"clusters":{}}}}`,
+			reason: "no clusters",
+		},
+		{
+			name:   "a key nothing supplies at any level",
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"}}`),
+			reason: "databases.default",
 		},
 		{
 			name:   "literal password",
-			body:   `{"connection":{"host":"h","user":"u","password":"hunter2"},"databases":{"default":"d"}}`,
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"hunter2"},"databases":{"default":"d"}}`),
 			reason: "connection.password",
 		},
 		{
 			name:   "duration without a unit",
-			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"timeouts":{"query":"30"}}`,
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"timeouts":{"query":"30"}}`),
 			reason: "query",
 		},
 		{
 			name:   "unknown sslmode",
-			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}","sslmode":"maybe"},"databases":{"default":"d"}}`,
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}","sslmode":"maybe"},"databases":{"default":"d"}}`),
 			reason: "sslmode",
 		},
 		{
 			name:   "exclude hiding the default database",
-			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"app_db","showAll":true,"exclude":["app_*"]}}`,
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"app_db","showAll":true,"exclude":["app_*"]}}`),
 			reason: "databases.exclude",
 		},
 		{
 			name:   "a pool of no databases",
-			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"pool":{"maxDatabases":0}}`,
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"pool":{"maxDatabases":0}}`),
 			reason: "pool.maxDatabases",
 		},
 		{
 			name:   "more connections per database than anyone wants",
-			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"pool":{"maxConnsPerDatabase":5000}}`,
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"pool":{"maxConnsPerDatabase":5000}}`),
 			reason: "pool.maxConnsPerDatabase",
 		},
 		{
 			name:   "a query with no limit",
-			body:   `{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"timeouts":{"query":"0s"}}`,
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"d"},"timeouts":{"query":"0s"}}`),
 			reason: "timeouts.query",
 		},
 		{
@@ -167,11 +268,29 @@ func TestLoadRejects(t *testing.T) {
 	}
 }
 
+// Which cluster is unusable is the whole of the diagnosis when there are ten of
+// them and one has a typo in it.
+func TestLoadNamesTheClusterItRefused(t *testing.T) {
+	t.Setenv("INFRA_MCP_TEST_PASSWORD", "secret")
+	loc := configAt(t, `{
+	  "connection": {"host": "h", "user": "u", "password": "${INFRA_MCP_TEST_PASSWORD}"},
+	  "environments": {"stage": {"clusters": {"reporting": {"pool": {"maxDatabases": 0}}}}}
+	}`)
+
+	_, err := mcpsrv.Load(loc, postgres.Defaults(), postgres.ConfigTypes())
+	if err == nil {
+		t.Fatal("Load accepted a cluster with an empty pool")
+	}
+	if !strings.Contains(err.Error(), "stage/reporting") {
+		t.Errorf("error %q does not name the cluster", err)
+	}
+}
+
 func TestLoadNamesAnUnsetVariable(t *testing.T) {
 	if err := os.Unsetenv("INFRA_MCP_TEST_PASSWORD"); err != nil {
 		t.Fatal(err)
 	}
-	loc := configAt(t, validConfig)
+	loc := configAt(t, oneCluster(validCluster))
 
 	_, err := mcpsrv.Load(loc, postgres.Defaults(), postgres.ConfigTypes())
 	if err == nil {
@@ -185,9 +304,8 @@ func TestLoadNamesAnUnsetVariable(t *testing.T) {
 func TestInitWritesAConfigThatLoads(t *testing.T) {
 	t.Setenv("PGPASSWORD", "secret")
 	loc := mcpsrv.Location{
-		Source:  postgres.Name,
-		Profile: "default",
-		Flag:    filepath.Join(t.TempDir(), "postgres.default.json"),
+		Source: postgres.Name,
+		Flag:   filepath.Join(t.TempDir(), "postgres.json"),
 	}
 
 	path, err := mcpsrv.Init(loc, postgres.Minimal(), mcpsrv.SchemaURL(postgres.Name))
@@ -206,6 +324,9 @@ func TestInitWritesAConfigThatLoads(t *testing.T) {
 	if _, ok := written["pool"]; ok {
 		t.Error("Init wrote the pool defaults; the file must carry the minimum only")
 	}
+	if _, ok := written["environments"]; !ok {
+		t.Error("Init wrote no environments, so the file it wrote reaches nothing")
+	}
 
 	if _, err := mcpsrv.Load(loc, postgres.Defaults(), postgres.ConfigTypes()); err != nil {
 		t.Errorf("the file Init wrote does not load: %v", err)
@@ -214,9 +335,36 @@ func TestInitWritesAConfigThatLoads(t *testing.T) {
 
 func configAt(t *testing.T, body string) mcpsrv.Location {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "postgres.default.json")
+	path := filepath.Join(t.TempDir(), "postgres.json")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return mcpsrv.Location{Source: postgres.Name, Profile: "default", Flag: path}
+	return mcpsrv.Location{Source: postgres.Name, Flag: path}
+}
+
+func load(t *testing.T, body string) mcpsrv.Inventory[postgres.Config] {
+	t.Helper()
+	inv, err := mcpsrv.Load(configAt(t, body), postgres.Defaults(), postgres.ConfigTypes())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return inv
+}
+
+func mustLoad(t *testing.T, body string) mcpsrv.Cluster[postgres.Config] {
+	t.Helper()
+	cluster, err := load(t, body).Find(devMain)
+	if err != nil {
+		t.Fatalf("Find(%s): %v", devMain, err)
+	}
+	return cluster
+}
+
+func find(t *testing.T, inv mcpsrv.Inventory[postgres.Config], addr mcpsrv.Address) postgres.Config {
+	t.Helper()
+	cluster, err := inv.Find(addr)
+	if err != nil {
+		t.Fatalf("Find(%s): %v", addr, err)
+	}
+	return cluster.Config
 }

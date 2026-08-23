@@ -9,24 +9,36 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Conte777/infra-mcp/internal/mcpsrv"
 )
 
-// pools is the per-database pool cache: one database is one pool, the least
-// recently used evicted past pool.maxDatabases so that walking fifty databases
-// cannot eat someone else's max_connections (ADR-0003). Closing is deferred by
-// refcount — eviction never pulls a pool out from under a running call.
+// address is the triple a pool answers for: one database of one cluster. The
+// cluster half is what keeps two clusters that both have an "orders" database
+// from sharing a pool into whichever of them was reached first.
+type address struct {
+	cluster  mcpsrv.Address
+	database string
+}
+
+func (a address) String() string { return a.cluster.String() + "/" + a.database }
+
+// pools is the pool cache: one address is one pool, the least recently used of
+// a cluster evicted past that cluster's pool.maxDatabases so that walking fifty
+// databases cannot eat someone else's max_connections (ADR-0003). Closing is
+// deferred by refcount — eviction never pulls a pool out from under a running
+// call.
 type pools struct {
-	cfg Config
 	log *slog.Logger
 
 	mu     sync.Mutex
-	byDB   map[string]*entry
+	byAddr map[address]*entry
 	lru    *list.List // *entry, most recently used at the front
 	closed bool
 }
 
 type entry struct {
-	db   string
+	addr address
 	pool *pgxpool.Pool
 	el   *list.Element
 	refs int
@@ -34,18 +46,23 @@ type entry struct {
 	dead bool
 	// idleSince is when refs last reached zero; the sweep reads it.
 	idleSince time.Time
+	// idle is the idleTimeout of the cluster this pool belongs to: the sweep
+	// runs over every cluster's pools at once, and they need not agree.
+	idle time.Duration
 }
 
-func newPools(cfg Config, log *slog.Logger) *pools {
-	return &pools{cfg: cfg, log: log, byDB: make(map[string]*entry), lru: list.New()}
+func newPools(log *slog.Logger) *pools {
+	return &pools{log: log, byAddr: make(map[address]*entry), lru: list.New()}
 }
 
 var errPoolsClosed = errors.New("the server is shutting down")
 
-// acquire hands out the pool for db and a release the caller must call. The
-// pool is created on first use and its failure to connect is not remembered:
-// what is cached is the pool, and pgx dials again on the next call.
-func (p *pools) acquire(ctx context.Context, db string) (*pgxpool.Pool, func(), error) {
+// acquire hands out the pool for addr and a release the caller must call. cfg
+// is the config in effect at that address, and is read only when the pool has
+// to be opened: the pool is created on first use and its failure to connect is
+// not remembered — what is cached is the pool, and pgx dials again on the next
+// call.
+func (p *pools) acquire(ctx context.Context, cfg Config, addr address) (*pgxpool.Pool, func(), error) {
 	// Registered before the unlock below, so it runs after it: closing a pool
 	// waits for its connections to come back, and on a socket that stopped
 	// answering the driver takes its cleanup timeout to give up. Under the lock
@@ -68,11 +85,11 @@ func (p *pools) acquire(ctx context.Context, db string) (*pgxpool.Pool, func(), 
 	}
 	stale = append(stale, p.sweepIdle()...)
 
-	e, ok := p.byDB[db]
+	e, ok := p.byAddr[addr]
 	if ok {
 		p.lru.MoveToFront(e.el)
 	} else {
-		pc, err := poolConfig(p.cfg, db)
+		pc, err := poolConfig(cfg, addr.database)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -82,16 +99,16 @@ func (p *pools) acquire(ctx context.Context, db string) (*pgxpool.Pool, func(), 
 		if err != nil {
 			return nil, nil, err
 		}
-		e = &entry{db: db, pool: pool, idleSince: time.Now()}
+		e = &entry{addr: addr, pool: pool, idleSince: time.Now(), idle: cfg.Pool.IdleTimeout.Duration()}
 		e.el = p.lru.PushFront(e)
-		p.byDB[db] = e
-		p.log.Debug("pool opened", "database", db, "open", len(p.byDB))
+		p.byAddr[addr] = e
+		p.log.Debug("pool opened", "address", addr, "open", len(p.byAddr))
 	}
 
 	// Before the overflow check: the pool this call came for is in use from
 	// here, and an eviction that picks it is an eviction of nothing.
 	e.refs++
-	stale = append(stale, p.evictOverflow()...)
+	stale = append(stale, p.evictOverflow(addr.cluster, cfg.Pool.MaxDatabases)...)
 
 	return e.pool, func() { p.release(e) }, nil
 }
@@ -113,18 +130,18 @@ func (p *pools) release(e *entry) {
 	}
 }
 
-// evictOverflow drops least-recently-used pools until the cache is back within
-// pool.maxDatabases, returning the ones the caller must close. Called with the
-// lock held.
-func (p *pools) evictOverflow() []*pgxpool.Pool {
+// evictOverflow drops least-recently-used pools of one cluster until it is back
+// within its pool.maxDatabases, returning the ones the caller must close. The
+// limit is a cluster's, not the process's: a source has one shape of cluster
+// config and no second, per-process one. Called with the lock held.
+func (p *pools) evictOverflow(cluster mcpsrv.Address, limit int) []*pgxpool.Pool {
 	var stale []*pgxpool.Pool
-	for len(p.byDB) > max(p.cfg.Pool.MaxDatabases, 1) {
-		e := p.evictable()
+	for p.count(cluster) > max(limit, 1) {
+		e := p.evictable(cluster)
 		if e == nil {
 			break
 		}
-		p.log.Info("pool evicted", "database", e.db, "inUse", e.refs > 0,
-			"limit", p.cfg.Pool.MaxDatabases)
+		p.log.Info("pool evicted", "address", e.addr, "inUse", e.refs > 0, "limit", limit)
 		if pool := p.drop(e); pool != nil {
 			stale = append(stale, pool)
 		}
@@ -132,13 +149,27 @@ func (p *pools) evictOverflow() []*pgxpool.Pool {
 	return stale
 }
 
-// evictable is the least recently used entry, preferring one nobody is using:
-// evicting a busy pool is legal — the close waits — but it costs a reconnect
-// the very next moment.
-func (p *pools) evictable() *entry {
+// count is how many pools cluster holds. Called with the lock held.
+func (p *pools) count(cluster mcpsrv.Address) int {
+	n := 0
+	for addr := range p.byAddr {
+		if addr.cluster == cluster {
+			n++
+		}
+	}
+	return n
+}
+
+// evictable is the least recently used entry of cluster, preferring one nobody
+// is using: evicting a busy pool is legal — the close waits — but it costs a
+// reconnect the very next moment.
+func (p *pools) evictable(cluster mcpsrv.Address) *entry {
 	var busy *entry
 	for el := p.lru.Back(); el != nil; el = el.Prev() {
 		e, _ := el.Value.(*entry)
+		if e.addr.cluster != cluster {
+			continue
+		}
 		if e.refs == 0 {
 			return e
 		}
@@ -154,17 +185,13 @@ func (p *pools) evictable() *entry {
 // left here is bookkeeping the next call can just as well reclaim.
 // Called with the lock held.
 func (p *pools) sweepIdle() []*pgxpool.Pool {
-	idle := p.cfg.Pool.IdleTimeout.Duration()
-	if idle <= 0 {
-		return nil
-	}
 	var stale []*pgxpool.Pool
 	now := time.Now()
 	for el := p.lru.Back(); el != nil; {
 		e, _ := el.Value.(*entry)
 		el = el.Prev()
-		if e.refs == 0 && now.Sub(e.idleSince) > idle {
-			p.log.Debug("pool closed after idle", "database", e.db, "idle", idle)
+		if e.idle > 0 && e.refs == 0 && now.Sub(e.idleSince) > e.idle {
+			p.log.Debug("pool closed after idle", "address", e.addr, "idle", e.idle)
 			if pool := p.drop(e); pool != nil {
 				stale = append(stale, pool)
 			}
@@ -173,13 +200,13 @@ func (p *pools) sweepIdle() []*pgxpool.Pool {
 	return stale
 }
 
-// forget drops the pool for db when the call that opened it never got a
+// forget drops the pool for addr when the call that opened it never got a
 // connection. An entry that cannot connect is still an entry: three wrong
 // database names would push the working pool out of a cache of four.
-func (p *pools) forget(db string) {
+func (p *pools) forget(addr address) {
 	p.mu.Lock()
 	var stale *pgxpool.Pool
-	if e, ok := p.byDB[db]; ok {
+	if e, ok := p.byAddr[addr]; ok {
 		stale = p.drop(e)
 	}
 	p.mu.Unlock()
@@ -193,7 +220,7 @@ func (p *pools) forget(db string) {
 // when someone still holds it — then the last release closes it. Closing is the
 // caller's job because it happens outside the lock. Called with the lock held.
 func (p *pools) drop(e *entry) *pgxpool.Pool {
-	delete(p.byDB, e.db)
+	delete(p.byAddr, e.addr)
 	p.lru.Remove(e.el)
 	e.dead = true
 	if e.refs > 0 {
@@ -224,5 +251,5 @@ func (p *pools) Close() {
 func (p *pools) open() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.byDB)
+	return len(p.byAddr)
 }

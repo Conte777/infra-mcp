@@ -29,13 +29,15 @@ type Source[C any] interface {
 
 // Runtime is what the core knows by the time tools are registered.
 type Runtime[C any] struct {
-	Config   C
-	Settings Settings
+	// Inventory is every cluster the config declares; a call is handed the one
+	// its address names.
+	Inventory Inventory[C]
+	Settings  Settings
 	// Degraded is the config failure a degraded start answers every call with.
-	// While it is set no handler runs, so Config is never read.
+	// While it is set no handler runs, so Inventory is never read.
 	Degraded error
-	// Env is what the status tool reports.
-	Env Env
+	// Process is what the status tool reports.
+	Process Process
 	// Logger writes to stderr. Nil discards: slog.Default writes to stdout,
 	// where the stdio transport lives and a stray line breaks the session.
 	Logger *slog.Logger
@@ -86,14 +88,20 @@ type Handler[C, In any] func(ctx context.Context, cfg C, in In) ([]block.Block, 
 // Read registers a tool that only reads: named <prefix>_read_<action>, marked
 // ReadOnlyHint, and never carrying the confirmation marker. The name is what a
 // permissions allow-list globs over, which is why the core assembles it.
-func Read[C, In any](r *Registry[C], action, description string, h Handler[C, In]) {
+func Read[C any, In Addressed](r *Registry[C], action, description string, h Handler[C, In]) {
 	register(r, accessRead, action, description, h)
 }
 
 // Write registers a tool that changes the source: named <prefix>_write_<action>,
 // carrying the confirmation marker unless tools.write.requireConfirmation is off.
-func Write[C, In any](r *Registry[C], action, description string, h Handler[C, In]) {
+func Write[C any, In Addressed](r *Registry[C], action, description string, h Handler[C, In]) {
 	register(r, accessWrite, action, description, h)
+}
+
+// readCore is the door for a read tool of the core's own, which answers about
+// the server rather than about one cluster and so takes no address.
+func readCore[C, In any](r *Registry[C], action, description string, h Handler[C, In]) {
+	register(r, accessRead, action, description, h)
 }
 
 type access string
@@ -130,7 +138,7 @@ func register[C, In any](r *Registry[C], a access, action, description string, h
 	// Out is any and the returned value is always nil: anything else fills
 	// structuredContent, and the answer stops being the markdown we shaped.
 	mcp.AddTool(r.server, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
-		blocks, err := call(ctx, r, h, in)
+		blocks, err := call(ctx, r, a, h, in)
 		if err != nil {
 			f := asFailure(err)
 			// The cause and nothing past it: a source value or a password
@@ -150,9 +158,11 @@ func register[C, In any](r *Registry[C], a access, action, description string, h
 	})
 }
 
-// call is where a degraded start stops being a special case: it is the
+// call resolves the address before the handler sees anything: which cluster a
+// call reaches, and whether that cluster takes a write at all, are the core's
+// to decide. A degraded start stops being a special case here too — it is the
 // not-configured kind, taking the route every other failure takes.
-func call[C, In any](ctx context.Context, r *Registry[C], h Handler[C, In], in In) ([]block.Block, error) {
+func call[C, In any](ctx context.Context, r *Registry[C], a access, h Handler[C, In], in In) ([]block.Block, error) {
 	if r.rt.Degraded != nil {
 		return nil, &Failure{
 			Kind:   KindNotConfigured,
@@ -160,7 +170,26 @@ func call[C, In any](ctx context.Context, r *Registry[C], h Handler[C, In], in I
 			Err:    r.rt.Degraded,
 		}
 	}
-	return h(ctx, r.rt.Config, in)
+
+	cfg := r.rt.Inventory.Global
+	if addressed, ok := any(in).(Addressed); ok {
+		cluster, err := r.rt.Inventory.Find(addressed.address())
+		if err != nil {
+			return nil, err
+		}
+		// The tool is not hidden: it is one tool for every address, and only
+		// the address decides. Hiding it would make the tool set depend on the
+		// config, which the allow-list may not.
+		if a == accessWrite && cluster.ReadOnly {
+			return nil, &Failure{
+				Kind:   KindDenied,
+				Detail: fmt.Sprintf("%s is marked readOnly in the config", cluster.Address),
+				Hint:   "a read tool works at this address; writing needs the readOnly key cleared",
+			}
+		}
+		cfg = cluster.Config
+	}
+	return h(ctx, cfg, in)
 }
 
 func textResult(s string) *mcp.CallToolResult {

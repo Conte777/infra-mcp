@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,11 +18,14 @@ import (
 )
 
 // Common is the part of a source config the core itself reads. Every source
-// config embeds it, so the six stay identical where they must be.
-type Common[ReadTools any] struct {
-	Schema string           `json:"$schema,omitzero" jsonschema:"URL of the JSON Schema describing this file"`
-	Output Output           `json:"output,omitzero" jsonschema:"limits on the size of a tool answer"`
-	Tools  Tools[ReadTools] `json:"tools,omitzero" jsonschema:"per-tool behaviour"`
+// config embeds it, so the six stay identical where they must be. Alongside it
+// a source config embeds its own cluster type: that is the global level, the
+// settings every cluster below inherits.
+type Common[Cluster any, ReadTools any] struct {
+	Schema       string                          `json:"$schema,omitzero" jsonschema:"URL of the JSON Schema describing this file"`
+	Output       Output                          `json:"output,omitzero" jsonschema:"limits on the size of a tool answer"`
+	Tools        Tools[ReadTools]                `json:"tools,omitzero" jsonschema:"per-tool behaviour"`
+	Environments map[string]Environment[Cluster] `json:"environments" jsonschema:"environments this server serves, by name"`
 }
 
 // Output caps a tool answer. maxBytes is measured on the rendered markdown —
@@ -56,22 +61,25 @@ type Settings struct {
 }
 
 // Settings implements [ConfigPtr].
-func (c *Common[R]) Settings() Settings {
+func (c *Common[K, R]) Settings() Settings {
 	return Settings{Output: c.Output, Write: c.Tools.Write}
 }
 
-// Validate is the no-op a source overrides with the checks a schema cannot state.
-func (c *Common[R]) Validate() error { return nil }
+// Validate is the no-op a source overrides with the checks a schema cannot
+// state. It runs on a cluster's config, once inheritance has filled it in.
+func (c *Common[K, R]) Validate() error { return nil }
 
-func (c *Common[R]) setSchemaURL(url string) { c.Schema = url }
+func (c *Common[K, R]) setSchemaURL(url string) { c.Schema = url }
 
-// ConfigPtr constrains a source config to one that embeds [Common]. The
-// unexported method is the enforcement: no other type can satisfy it.
+// ConfigPtr constrains a source config to one that embeds [Common] and, for
+// the cluster half of it, [ClusterCommon]. The unexported methods are the
+// enforcement: no other type can satisfy it.
 type ConfigPtr[C any] interface {
 	*C
 	Settings() Settings
 	Validate() error
 	setSchemaURL(string)
+	readOnly() bool
 }
 
 // Duration is a config duration written as "30s": time.Duration marshals as a
@@ -100,14 +108,10 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// DefaultProfile is the profile a server runs under when --profile is not given.
-const DefaultProfile = "default"
-
-// Location is where the config for one source and profile may live.
+// Location is where the config for one source may live.
 type Location struct {
-	Source  string // "postgres"
-	Profile string // "default"
-	Flag    string // value of --config, empty when unset
+	Source string // "postgres"
+	Flag   string // value of --config, empty when unset
 }
 
 // EnvVar is the per-source environment variable holding a config path. Per
@@ -116,13 +120,15 @@ func (l Location) EnvVar() string {
 	return "INFRA_MCP_" + strings.ToUpper(l.Source) + "_CONFIG"
 }
 
-// XDGPath is the default location, $XDG_CONFIG_HOME/infra-mcp/<source>.<profile>.json.
+// XDGPath is the default location, $XDG_CONFIG_HOME/infra-mcp/<source>.json.
+// One file per source and no more: every environment of every cluster lives in
+// it.
 func (l Location) XDGPath() string {
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
 		dir = filepath.Join(os.Getenv("HOME"), ".config")
 	}
-	return filepath.Join(dir, "infra-mcp", l.Source+"."+l.Profile+".json")
+	return filepath.Join(dir, "infra-mcp", l.Source+".json")
 }
 
 // namedPath is the path the operator named — by --config, else by the
@@ -211,20 +217,27 @@ const (
 	schemaHint = "run with --print-config-schema for the keys this build accepts"
 )
 
-// Load reads the config for loc and applies it on top of defaults. Every
-// failure is a *ConfigError, which the caller turns into a degraded start
-// rather than an exit.
-func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (C, error) {
+// noEnvironments is the diagnosis a 0.1 config gets. Checked before the schema,
+// which would answer the same file with a heap of unknown-key complaints and
+// never say what replaced them.
+const noEnvironments = "declares no environments: the connection settings that used to sit at the top level " +
+	"now live in a cluster, under environments.<environment>.clusters.<cluster>, and the top level keeps only " +
+	"what every cluster inherits"
+
+// Load reads the config for loc and resolves it into one config per cluster:
+// the file's global level, then the environment, then the cluster, each level
+// overriding the one above. Every failure is a *ConfigError, which the caller
+// turns into a degraded start rather than an exit.
+func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (Inventory[C], error) {
 	var path string
 	var searched []string
 	var haveFile bool
-	fail := func(reason string, err error) (C, error) {
-		var zero C
+	fail := func(reason string, err error) (Inventory[C], error) {
 		hint := initHint
 		if haveFile {
 			hint = schemaHint
 		}
-		return zero, &ConfigError{Searched: searched, Path: path, Reason: reason, Hint: hint, Err: err}
+		return Inventory[C]{}, &ConfigError{Searched: searched, Path: path, Reason: reason, Hint: hint, Err: err}
 	}
 
 	path, searched, err := loc.Resolve()
@@ -244,6 +257,14 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (C
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fail("is not valid JSON: "+err.Error(), err)
 	}
+	root, ok := raw.(map[string]any)
+	if !ok {
+		return fail("is not a JSON object", nil)
+	}
+	environments, ok := root[keyEnvironments].(map[string]any)
+	if !ok || len(environments) == 0 {
+		return fail(noEnvironments, nil)
+	}
 
 	// Validating the raw document, not the decoded struct: decoding drops an
 	// unknown key silently, and a typo would take its setting with it.
@@ -259,31 +280,73 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (C
 		return fail("does not match the schema: "+err.Error(), err)
 	}
 
-	// Before expansion: afterwards a ${VAR} and a literal look alike.
-	if err := checkSecrets(raw, secretPaths[C]()); err != nil {
-		return fail(err.Error(), err)
-	}
+	// The global level is the whole document minus the environments under it.
+	global := without(root, keyEnvironments)
 
-	expanded, err := expand(raw)
+	inv := Inventory[C]{}
+	secrets := secretPaths[C]()
+	// Not validated: the global level is free to be incomplete, and every key
+	// missing from it is either supplied below or reported there.
+	inv.Global, err = decode[C, P](global, defaults, secrets, false)
 	if err != nil {
 		return fail(err.Error(), err)
 	}
 
-	// The round trip applies the file on top of defaults: a key absent from the
-	// document leaves the default in place.
+	for _, envName := range slices.Sorted(maps.Keys(environments)) {
+		env, _ := environments[envName].(map[string]any)
+		clusters, _ := env[keyClusters].(map[string]any)
+		if len(clusters) == 0 {
+			return fail(fmt.Sprintf("environment %s declares no clusters", envName), nil)
+		}
+		level := inherit(global, without(env, keyClusters))
+
+		for _, name := range slices.Sorted(maps.Keys(clusters)) {
+			cluster, _ := clusters[name].(map[string]any)
+			addr := Address{Environment: envName, Cluster: name}
+			cfg, err := decode[C, P](inherit(level, cluster), defaults, secrets, true)
+			if err != nil {
+				return fail(addr.String()+": "+err.Error(), err)
+			}
+			inv.Clusters = append(inv.Clusters, Cluster[C]{Address: addr, Config: cfg, ReadOnly: P(&cfg).readOnly()})
+		}
+	}
+	return inv, nil
+}
+
+// without is one level of the file with a key of the core's own taken out of
+// it: what is left is the source's, and inherits as one object.
+func without(level map[string]any, key string) map[string]any {
+	out := maps.Clone(level)
+	delete(out, key)
+	return out
+}
+
+// decode turns one level object into a config: secrets are checked first,
+// because after expansion a ${VAR} and a literal are the same string, and the
+// round trip through JSON applies the object on top of defaults, so a key it
+// leaves out keeps the default.
+func decode[C any, P ConfigPtr[C]](level map[string]any, defaults C, secrets [][]string, validate bool) (C, error) {
+	var zero C
+	if err := checkSecrets(level, secrets); err != nil {
+		return zero, err
+	}
+	expanded, err := expand(level)
+	if err != nil {
+		return zero, err
+	}
 	normalized, err := json.Marshal(expanded)
 	if err != nil {
-		return fail("cannot be re-encoded: "+err.Error(), err)
+		return zero, fmt.Errorf("cannot be re-encoded: %w", err)
 	}
 	cfg := defaults
 	if err := json.Unmarshal(normalized, &cfg); err != nil {
-		return fail("cannot be decoded: "+err.Error(), err)
+		return zero, fmt.Errorf("cannot be decoded: %w", err)
 	}
-
-	if err := P(&cfg).Validate(); err != nil {
-		return fail(err.Error(), err)
+	if validate {
+		if err := P(&cfg).Validate(); err != nil {
+			return zero, err
+		}
 	}
-
 	return cfg, nil
 }
 

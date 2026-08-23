@@ -36,8 +36,18 @@ func testSpec() Spec[testConfig] {
 	return Spec[testConfig]{Name: "fake", Source: &fakeSource{}, Defaults: defaults, Minimal: testConfig{}}
 }
 
-func testEnv() Env {
-	return Env{Source: "fake", Profile: DefaultProfile, ConfigPath: "/tmp/fake.default.json", Transport: "stdio"}
+// testAddress is the one cluster every fake server in here serves.
+var testAddress = Address{Environment: "dev", Cluster: "main"}
+
+func testInventory(clusters ...Cluster[testConfig]) Inventory[testConfig] {
+	if clusters == nil {
+		clusters = []Cluster[testConfig]{{Address: testAddress, Config: testSpec().Defaults}}
+	}
+	return Inventory[testConfig]{Global: testSpec().Defaults, Clusters: clusters}
+}
+
+func testProcess() Process {
+	return Process{Source: "fake", ConfigPath: "/tmp/fake.json", Transport: "stdio"}
 }
 
 func connect(t *testing.T, server *mcp.Server) *mcp.ClientSession {
@@ -57,7 +67,7 @@ func connect(t *testing.T, server *mcp.Server) *mcp.ClientSession {
 func buildSession(t *testing.T, degraded error) *mcp.ClientSession {
 	t.Helper()
 	spec := testSpec()
-	return connect(t, Build(spec, NewRuntime(spec.Defaults, degraded, testEnv(), nil)))
+	return connect(t, Build(spec, NewRuntime(testInventory(), degraded, testProcess(), nil)))
 }
 
 // The status tool takes no arguments, every other fake tool takes testIn.
@@ -65,7 +75,11 @@ func callTool(t *testing.T, cs *mcp.ClientSession, name string) *mcp.CallToolRes
 	t.Helper()
 	var args map[string]any
 	if !strings.HasSuffix(name, "_"+statusAction) {
-		args = map[string]any{"name": "world"}
+		args = map[string]any{
+			"name":        "world",
+			"environment": testAddress.Environment,
+			"cluster":     testAddress.Cluster,
+		}
 	}
 	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
@@ -151,7 +165,7 @@ func TestStatusReportsTheConfigItSettledOn(t *testing.T) {
 
 	got := resultText(t, callTool(t, cs, "tt_read_status"))
 
-	for _, want := range []string{"/tmp/fake.default.json", "stdio", DefaultProfile, "maxBytes"} {
+	for _, want := range []string{"/tmp/fake.json", "stdio", "clusters", "maxBytes"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("status = %q, want it to mention %q", got, want)
 		}
@@ -169,7 +183,7 @@ func TestSourceMayNotRegisterTheStatusTool(t *testing.T) {
 
 	spec := testSpec()
 	spec.Source = &statusStealingSource{}
-	Build(spec, NewRuntime(spec.Defaults, nil, testEnv(), nil))
+	Build(spec, NewRuntime(testInventory(), nil, testProcess(), nil))
 }
 
 type statusStealingSource struct{ fakeSource }
@@ -195,7 +209,7 @@ func TestAFailedCallIsLoggedWithItsCause(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&out, nil))
 	spec := testSpec()
 	spec.Source = &failingSource{}
-	cs := connect(t, Build(spec, NewRuntime(spec.Defaults, nil, testEnv(), log)))
+	cs := connect(t, Build(spec, NewRuntime(testInventory(), nil, testProcess(), log)))
 
 	callTool(t, cs, "tt_read_rows")
 
@@ -219,7 +233,7 @@ func TestADegradedCallIsNotLoggedAsAnError(t *testing.T) {
 	var out strings.Builder
 	log := slog.New(slog.NewTextHandler(&out, nil))
 	spec := testSpec()
-	cs := connect(t, Build(spec, NewRuntime(spec.Defaults, errors.New("no config"), testEnv(), log)))
+	cs := connect(t, Build(spec, NewRuntime(testInventory(), errors.New("no config"), testProcess(), log)))
 
 	callTool(t, cs, "tt_read_rows")
 
