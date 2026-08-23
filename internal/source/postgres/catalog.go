@@ -36,8 +36,9 @@ func listDatabases(ctx context.Context, tx pgx.Tx, cfg Config, _ ConnectionArgs)
 			return nil, err
 		}
 		// Listed exactly when reachable: the same call the tools resolve their
-		// database argument through decides both.
-		if _, err := resolveDatabase(cfg, name); err != nil {
+		// database argument through decides both — including for the database
+		// this query is running in, which is an entry point and not a licence.
+		if _, err := resolveDatabase(cfg, name, true); err != nil {
 			continue
 		}
 		t.Rows = append(t.Rows, []any{name, value(size), allowsConnections, value(comment)})

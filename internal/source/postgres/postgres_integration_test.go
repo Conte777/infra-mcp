@@ -21,9 +21,12 @@ import (
 // creates; the eviction test needs a second database to walk into.
 const otherDatabase = "postgres"
 
-// callArgs is the address the harness's one cluster answers at; only the
-// database argument varies between the calls below.
-var callArgs = Args{Address: testCluster}
+// callArgs is the harness's one address, aimed at the database it created.
+// Nothing defaults it: a tool that takes a database argument has to be given
+// one, or the entry point would answer for every call that named nothing.
+func callArgs(cfg Config) Args {
+	return Args{Address: testCluster, Database: cfg.Databases.Default}
+}
 
 func testSource(t *testing.T, tune func(*Config)) (*Source, Config) {
 	t.Helper()
@@ -257,7 +260,7 @@ func TestPoolsOpenOnFirstCall(t *testing.T) {
 // else's max_connections, and the refcount is what keeps it from doing that to
 // a query in flight.
 func TestEvictionLeavesARunningQueryAlone(t *testing.T) {
-	s, cfg := testSource(t, func(c *Config) { c.Pool.MaxDatabases = 1; c.Databases.ShowAll = true })
+	s, cfg := testSource(t, func(c *Config) { c.Pool.MaxDatabases = 1 })
 
 	evicted := make(chan struct{})
 	_, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
@@ -284,7 +287,7 @@ func TestEvictionLeavesARunningQueryAlone(t *testing.T) {
 }
 
 func TestUnknownDatabaseIsABadArgument(t *testing.T) {
-	s, cfg := testSource(t, func(c *Config) { c.Databases.ShowAll = true })
+	s, cfg := testSource(t, nil)
 
 	_, err := runRead(t, s, cfg, Args{Address: testCluster, Database: "no_such_database"},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ Args) ([]block.Block, error) {

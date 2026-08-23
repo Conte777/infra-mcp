@@ -53,35 +53,40 @@ func column(t *testing.T, tbl block.Table, name string) []string {
 func TestListDatabasesShowsWhatTheToolsCanReach(t *testing.T) {
 	s, cfg := testSource(t, nil)
 
-	blocks, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster}, listDatabases)
-	if err != nil {
-		t.Fatalf("list: %v", err)
+	list := func(t *testing.T, cfg Config) []string {
+		t.Helper()
+		blocks, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster}, listDatabases)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		return column(t, table(t, blocks), "database")
 	}
-	if got := column(t, table(t, blocks), "database"); len(got) != 1 || got[0] != cfg.Databases.Default {
+
+	if got := list(t, cfg); len(got) < 2 {
+		t.Fatalf("databases = %v, want the whole cluster with no include", got)
+	}
+
+	only := cfg
+	only.Databases.Include = []string{cfg.Databases.Default}
+	if got := list(t, only); len(got) != 1 || got[0] != cfg.Databases.Default {
 		t.Errorf("databases = %v, want only %q", got, cfg.Databases.Default)
 	}
 
-	all := cfg
-	all.Databases.ShowAll = true
-	blocks, err = runRead(t, s, all, ConnectionArgs{Address: testCluster}, listDatabases)
-	if err != nil {
-		t.Fatalf("list with showAll: %v", err)
-	}
-	got := column(t, table(t, blocks), "database")
-	if len(got) < 2 {
-		t.Fatalf("databases = %v, want the whole cluster", got)
-	}
-
-	hidden := all
+	hidden := cfg
 	hidden.Databases.Exclude = []string{otherDatabase}
-	blocks, err = runRead(t, s, hidden, ConnectionArgs{Address: testCluster}, listDatabases)
-	if err != nil {
-		t.Fatalf("list with exclude: %v", err)
-	}
-	for _, db := range column(t, table(t, blocks), "database") {
+	for _, db := range list(t, hidden) {
 		if db == otherDatabase {
 			t.Errorf("%q is listed although databases.exclude hides it", db)
 		}
+	}
+
+	// The database the query itself runs in is an entry point, not a licence:
+	// an include naming one database has to yield one.
+	entry := cfg
+	entry.Databases.Include = []string{otherDatabase}
+	got := list(t, entry)
+	if len(got) != 1 || got[0] != otherDatabase {
+		t.Errorf("databases = %v, want only %q — the entry point listed itself", got, otherDatabase)
 	}
 }
 
@@ -96,7 +101,7 @@ func TestListTables(t *testing.T) {
 		CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 		COMMENT ON TABLE orders IS 'what people bought'`)
 
-	blocks, err := runRead(t, s, cfg, listTablesArgs{Args: callArgs}, listTables)
+	blocks, err := runRead(t, s, cfg, listTablesArgs{Args: callArgs(cfg)}, listTables)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -125,7 +130,7 @@ func TestListTables(t *testing.T) {
 		t.Error("the table comment did not reach the answer")
 	}
 
-	blocks, err = runRead(t, s, cfg, listTablesArgs{Args: callArgs, Pattern: "order%"}, listTables)
+	blocks, err = runRead(t, s, cfg, listTablesArgs{Args: callArgs(cfg), Pattern: "order%"}, listTables)
 	if err != nil {
 		t.Fatalf("list with a pattern: %v", err)
 	}
@@ -157,7 +162,7 @@ func TestDescribeTable(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, describeSchema)
 
-	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{"app.users", "app.orgs"}}, describeTable)
+	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{"app.users", "app.orgs"}}, describeTable)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -204,7 +209,7 @@ func TestDescribeView(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, describeSchema)
 
-	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{"app.adults"}}, describeTable)
+	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{"app.adults"}}, describeTable)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -240,7 +245,7 @@ func TestDescribePartitionedTable(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, partitionSchema)
 
-	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{"events"}}, describeTable)
+	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{"events"}}, describeTable)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -279,7 +284,7 @@ CREATE TABLE loaded_full PARTITION OF loaded FOR VALUES FROM (10) TO (100000)
 INSERT INTO loaded_full SELECT generate_series(10, 10000);
 ANALYZE loaded_empty`)
 
-	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{"loaded"}}, describeTable)
+	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{"loaded"}}, describeTable)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -297,7 +302,7 @@ func TestDescribePartition(t *testing.T) {
 	exec(t, cfg, cfg.Databases.Default, partitionSchema)
 
 	blocks, err := runRead(t, s, cfg,
-		describeArgs{Args: callArgs, Tables: []string{"events_2026", "events_rest", "events_2027"}}, describeTable)
+		describeArgs{Args: callArgs(cfg), Tables: []string{"events_2026", "events_rest", "events_2027"}}, describeTable)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -332,7 +337,7 @@ func TestDescribePartitionListStopsAtTheCeiling(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, partitionSchema)
 
-	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{"big"}}, describeTable)
+	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{"big"}}, describeTable)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -355,7 +360,7 @@ func TestDescribeCannotBeMadeToForgeALine(t *testing.T) {
 	exec(t, cfg, cfg.Databases.Default, "CREATE TABLE \"evil\n-- partition public.fake DEFAULT\""+
 		` PARTITION OF events FOR VALUES FROM ('2028-01-01') TO ('2029-01-01')`)
 
-	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{"events"}}, describeTable)
+	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{"events"}}, describeTable)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -385,7 +390,7 @@ func TestDescribeCannotBeMadeToForgeADDLLine(t *testing.T) {
 	// The evil name has to be handed over quoted, the way the model would read
 	// it out of any other listing.
 	blocks, err := runRead(t, s, cfg,
-		describeArgs{Args: callArgs, Tables: []string{"\"loot\n" + forged + "\"", "plain"}}, describeTable)
+		describeArgs{Args: callArgs(cfg), Tables: []string{"\"loot\n" + forged + "\"", "plain"}}, describeTable)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -408,7 +413,7 @@ func TestDescribeForeignTable(t *testing.T) {
 			total numeric
 		) SERVER remote OPTIONS (schema_name 'public', table_name 'orders')`)
 
-	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{"remote_orders"}}, describeTable)
+	blocks, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{"remote_orders"}}, describeTable)
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -434,7 +439,7 @@ func TestDescribeForeignTable(t *testing.T) {
 func TestDescribeUnknownTableIsABadArgument(t *testing.T) {
 	s, cfg := testSource(t, nil)
 
-	_, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{"no_such_table"}}, describeTable)
+	_, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{"no_such_table"}}, describeTable)
 
 	detail, hint := wantKind(t, err, mcpsrv.KindBadArgument)
 	if !strings.Contains(detail, "no_such_table") || hint == "" {
@@ -459,7 +464,7 @@ func TestDescribeRefusesWhatIsNotATable(t *testing.T) {
 		{"addr", "is a composite type, not a table", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{tc.name}}, describeTable)
+			_, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{tc.name}}, describeTable)
 
 			detail, hint := wantKind(t, err, mcpsrv.KindBadArgument)
 			if !strings.Contains(detail, tc.name) || !strings.Contains(detail, tc.kind) {
@@ -483,7 +488,7 @@ func TestDescribeRefusalCannotBeMadeToForgeALine(t *testing.T) {
 			"CREATE INDEX \"idx\n"+forged+"\" ON "+evil+" (id)")
 
 	_, err := runRead(t, s, cfg,
-		describeArgs{Args: callArgs, Tables: []string{"\"idx\n" + forged + "\""}}, describeTable)
+		describeArgs{Args: callArgs(cfg), Tables: []string{"\"idx\n" + forged + "\""}}, describeTable)
 
 	detail, hint := wantKind(t, err, mcpsrv.KindBadArgument)
 	if strings.Contains(detail, "\n"+forged) || strings.Contains(hint, "\n"+forged) {
@@ -496,7 +501,7 @@ func TestDescribeRefusalCannotBeMadeToForgeALine(t *testing.T) {
 func TestQueryRendersValuesAsPostgresWritesThem(t *testing.T) {
 	s, cfg := testSource(t, nil)
 
-	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: `
+	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: `
 		SELECT 1234.50::numeric(10,2) AS n,
 		       '{"b":1,"a":2}'::jsonb AS j,
 		       '\x00ff'::bytea AS raw,
@@ -516,7 +521,7 @@ func TestQueryRendersValuesAsPostgresWritesThem(t *testing.T) {
 func TestQueryStopsAtMaxRowsAndSaysThereIsMore(t *testing.T) {
 	s, cfg := testSource(t, func(c *Config) { c.Output.MaxRows = 3 })
 
-	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: "SELECT i FROM generate_series(1, 100000) i"}, runQuery)
+	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "SELECT i FROM generate_series(1, 100000) i"}, runQuery)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -536,7 +541,7 @@ func TestQueryStopsAtMaxRowsAndSaysThereIsMore(t *testing.T) {
 func TestQueryReadsStatementsACursorCannotHold(t *testing.T) {
 	s, cfg := testSource(t, nil)
 
-	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: "SHOW server_version_num"}, runQuery)
+	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "SHOW server_version_num"}, runQuery)
 	if err != nil {
 		t.Fatalf("show: %v", err)
 	}
@@ -549,10 +554,10 @@ func TestQueryRefusesAWriteBeforeItReachesTheServer(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int); INSERT INTO t VALUES (1)`)
 
-	_, err := runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: "DELETE FROM t"}, runQuery)
+	_, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "DELETE FROM t"}, runQuery)
 	wantKind(t, err, mcpsrv.KindDenied)
 
-	_, err = runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: "SELECT pg_read_file('/etc/passwd')"}, runQuery)
+	_, err = runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "SELECT pg_read_file('/etc/passwd')"}, runQuery)
 	wantKind(t, err, mcpsrv.KindDenied)
 }
 
@@ -563,12 +568,12 @@ func TestQueryCannotSmuggleASecondStatement(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE victim (id int)`)
 
-	if _, err := runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: "SELECT 1; COMMIT; DROP TABLE victim"}, runQuery); err == nil {
+	if _, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "SELECT 1; COMMIT; DROP TABLE victim"}, runQuery); err == nil {
 		t.Error("a read tool ran three statements")
 	}
 
 	const count = "SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'victim'"
-	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: count}, runQuery)
+	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: count}, runQuery)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -577,7 +582,7 @@ func TestQueryCannotSmuggleASecondStatement(t *testing.T) {
 	}
 
 	// Refusing every semicolon would cost honest queries this one.
-	blocks, err = runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: `SELECT 'a;b' AS s`}, runQuery)
+	blocks, err = runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: `SELECT 'a;b' AS s`}, runQuery)
 	if err != nil {
 		t.Fatalf("semicolon inside a literal: %v", err)
 	}
@@ -594,16 +599,16 @@ func TestNoCursorPathCannotSmuggleASecondStatement(t *testing.T) {
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE victim (id int)`)
 
 	if _, err := runRead(t, s, cfg,
-		sqlArgs{Args: callArgs, SQL: "SHOW server_version_num; COMMIT; DROP TABLE victim"}, runQuery); err == nil {
+		sqlArgs{Args: callArgs(cfg), SQL: "SHOW server_version_num; COMMIT; DROP TABLE victim"}, runQuery); err == nil {
 		t.Error("SHOW carried three statements")
 	}
 	if _, err := runRead(t, s, cfg,
-		explainArgs{Args: callArgs, SQL: "SELECT 1; COMMIT; DROP TABLE victim"}, explain); err == nil {
+		explainArgs{Args: callArgs(cfg), SQL: "SELECT 1; COMMIT; DROP TABLE victim"}, explain); err == nil {
 		t.Error("EXPLAIN carried three statements")
 	}
 
 	const count = "SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'victim'"
-	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: count}, runQuery)
+	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: count}, runQuery)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -616,7 +621,7 @@ func TestExplain(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int); INSERT INTO t VALUES (1), (2)`)
 
-	blocks, err := runRead(t, s, cfg, explainArgs{Args: callArgs, SQL: "SELECT * FROM t WHERE id = 1"}, explain)
+	blocks, err := runRead(t, s, cfg, explainArgs{Args: callArgs(cfg), SQL: "SELECT * FROM t WHERE id = 1"}, explain)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
@@ -628,7 +633,7 @@ func TestExplain(t *testing.T) {
 		t.Error("the plan was measured although analyze was not asked for")
 	}
 
-	blocks, err = runRead(t, s, cfg, explainArgs{Args: callArgs, SQL: "SELECT * FROM t", Analyze: true}, explain)
+	blocks, err = runRead(t, s, cfg, explainArgs{Args: callArgs(cfg), SQL: "SELECT * FROM t", Analyze: true}, explain)
 	if err != nil {
 		t.Fatalf("explain analyze: %v", err)
 	}
@@ -644,7 +649,7 @@ func TestWriteExecuteReportsEveryStatement(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int)`)
 
-	blocks, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs, SQL: `
+	blocks, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: `
 		INSERT INTO t VALUES (1), (2);
 		UPDATE t SET id = id + 10 WHERE id = 99;
 		CREATE TABLE u (id int)`}, execute)
@@ -664,7 +669,7 @@ func TestWriteExecuteReturnsWhatRETURNINGProduced(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int)`)
 
-	blocks, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs, SQL: "INSERT INTO t VALUES (1), (2) RETURNING id"}, execute)
+	blocks, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "INSERT INTO t VALUES (1), (2) RETURNING id"}, execute)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -679,12 +684,12 @@ func TestWriteExecuteRollsBackTheWholeScript(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int)`)
 
-	_, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs, SQL: "INSERT INTO t VALUES (1); SELECT 1 / 0"}, execute)
+	_, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "INSERT INTO t VALUES (1); SELECT 1 / 0"}, execute)
 	if err == nil {
 		t.Fatal("a division by zero went through")
 	}
 
-	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: "SELECT count(*) FROM t"}, runQuery)
+	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "SELECT count(*) FROM t"}, runQuery)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -701,7 +706,7 @@ func TestFailedWriteScriptKeepsItsConnection(t *testing.T) {
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int)`)
 
 	run := func(sql string) error {
-		_, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs, SQL: sql}, execute)
+		_, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: sql}, execute)
 		return err
 	}
 	if err := run("INSERT INTO t VALUES (1)"); err != nil {
@@ -730,7 +735,7 @@ func TestFailedWriteScriptKeepsItsConnection(t *testing.T) {
 func TestWriteExecuteRefusesAnEmptyScript(t *testing.T) {
 	s, cfg := testSource(t, nil)
 
-	_, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs, SQL: "-- nothing to do\n"}, execute)
+	_, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "-- nothing to do\n"}, execute)
 
 	wantKind(t, err, mcpsrv.KindBadArgument)
 }
@@ -741,7 +746,7 @@ func TestWriteExecuteSaysWhenTheScriptEndedTheTransaction(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int)`)
 
-	blocks, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs, SQL: "INSERT INTO t VALUES (1); COMMIT"}, execute)
+	blocks, err := runWrite(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "INSERT INTO t VALUES (1); COMMIT"}, execute)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -751,7 +756,7 @@ func TestWriteExecuteSaysWhenTheScriptEndedTheTransaction(t *testing.T) {
 
 	// The transaction status is 'I' after either, so the notice must not say the
 	// work landed — here it did not.
-	blocks, err = runWrite(t, s, cfg, sqlArgs{Args: callArgs, SQL: "INSERT INTO t VALUES (2); ROLLBACK"}, execute)
+	blocks, err = runWrite(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "INSERT INTO t VALUES (2); ROLLBACK"}, execute)
 	if err != nil {
 		t.Fatalf("execute with a rollback: %v", err)
 	}
@@ -759,7 +764,7 @@ func TestWriteExecuteSaysWhenTheScriptEndedTheTransaction(t *testing.T) {
 		t.Errorf("a rolled back script is reported as committed: %q", got)
 	}
 
-	blocks, err = runRead(t, s, cfg, sqlArgs{Args: callArgs, SQL: "SELECT count(*) AS n FROM t WHERE id = 2"}, runQuery)
+	blocks, err = runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "SELECT count(*) AS n FROM t WHERE id = 2"}, runQuery)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -772,7 +777,7 @@ func TestDescribeMalformedNameIsABadArgument(t *testing.T) {
 	s, cfg := testSource(t, nil)
 
 	for _, name := range []string{"", "app_db.public.orders"} {
-		_, err := runRead(t, s, cfg, describeArgs{Args: callArgs, Tables: []string{name}}, describeTable)
+		_, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: []string{name}}, describeTable)
 		if _, hint := wantKind(t, err, mcpsrv.KindBadArgument); hint == "" {
 			t.Errorf("%q: no hint on what to do instead", name)
 		}

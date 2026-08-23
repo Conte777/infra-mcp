@@ -16,33 +16,61 @@ import (
 func TestResolveDatabase(t *testing.T) {
 	tests := []struct {
 		name    string
-		showAll bool
+		include []string
 		exclude []string
 		arg     string
+		named   bool
 		want    string
-		denied  bool
+		kind    mcpsrv.Kind
 	}{
-		{name: "no argument is the default", arg: "", want: "app_db"},
-		{name: "the default itself", arg: "app_db", want: "app_db"},
-		{name: "another database is off limits", arg: "other", denied: true},
-		{name: "showAll opens the cluster", showAll: true, arg: "other", want: "other"},
-		{name: "exclude still hides", showAll: true, exclude: []string{"tmp_*"}, arg: "tmp_1", denied: true},
-		{name: "exclude misses", showAll: true, exclude: []string{"tmp_*"}, arg: "other", want: "other"},
+		{name: "a tool that names none runs in the entry point", want: "app_db"},
+		{
+			name: "an empty include is the whole cluster",
+			arg:  "other", named: true, want: "other",
+		},
+		{
+			name: "include is a white list", include: []string{"orders", "app_*"},
+			arg: "orders", named: true, want: "orders",
+		},
+		{
+			name: "what include does not name is off limits", include: []string{"orders"},
+			arg: "other", named: true, kind: mcpsrv.KindDenied,
+		},
+		{
+			// The entry point is where list_databases connects, and that is all:
+			// include naming one database must not quietly yield two.
+			name: "include does not spare the entry point", include: []string{"orders"},
+			arg: "app_db", named: true, kind: mcpsrv.KindDenied,
+		},
+		{
+			name: "exclude is subtracted after include", include: []string{"tmp_*"},
+			exclude: []string{"tmp_1"}, arg: "tmp_1", named: true, kind: mcpsrv.KindDenied,
+		},
+		{name: "exclude hides", exclude: []string{"tmp_*"}, arg: "tmp_1", named: true, kind: mcpsrv.KindDenied},
+		{name: "exclude misses", exclude: []string{"tmp_*"}, arg: "other", named: true, want: "other"},
+		{
+			// The schema marks the argument required, which says nothing about
+			// it being non-empty — and an empty dbname makes libpq read the
+			// role name as one.
+			name: "a tool that names an empty database", arg: "", named: true, kind: mcpsrv.KindBadArgument,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Defaults()
-			cfg.Databases = Databases{Default: "app_db", ShowAll: tt.showAll, Exclude: tt.exclude}
+			cfg.Databases = Databases{Default: "app_db", Include: tt.include, Exclude: tt.exclude}
 
-			got, err := resolveDatabase(cfg, tt.arg)
-			if tt.denied {
+			got, err := resolveDatabase(cfg, tt.arg, tt.named)
+			// A resolve that succeeds always names a database, so an empty want
+			// is the failing case; kind says how it fails.
+			if tt.want == "" {
 				var f *mcpsrv.Failure
 				if !errors.As(err, &f) {
 					t.Fatalf("resolveDatabase(%q) = %q, %v; want a failure", tt.arg, got, err)
 				}
-				if f.Kind != mcpsrv.KindDenied {
-					t.Errorf("kind = %v, want denied", f.Kind)
+				if f.Kind != tt.kind {
+					t.Errorf("kind = %v, want %v", f.Kind, tt.kind)
 				}
 				return
 			}

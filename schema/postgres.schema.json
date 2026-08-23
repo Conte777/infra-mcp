@@ -114,11 +114,17 @@
                   "properties": {
                     "default": {
                       "type": "string",
-                      "description": "database to connect to, and the only one reachable unless showAll is set"
+                      "description": "database the catalog queries connect to; reachable by name only if include and exclude let it through"
                     },
-                    "showAll": {
-                      "type": "boolean",
-                      "description": "allow tools into every database of the cluster"
+                    "include": {
+                      "type": [
+                        "null",
+                        "array"
+                      ],
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "glob patterns of the databases tools may reach; empty means every database of the cluster"
                     },
                     "exclude": {
                       "type": [
@@ -128,7 +134,7 @@
                       "items": {
                         "type": "string"
                       },
-                      "description": "glob patterns of databases to hide when showAll is set"
+                      "description": "glob patterns of databases to hide, subtracted after include"
                     }
                   },
                   "description": "which databases the tools may touch",
@@ -227,11 +233,17 @@
             "properties": {
               "default": {
                 "type": "string",
-                "description": "database to connect to, and the only one reachable unless showAll is set"
+                "description": "database the catalog queries connect to; reachable by name only if include and exclude let it through"
               },
-              "showAll": {
-                "type": "boolean",
-                "description": "allow tools into every database of the cluster"
+              "include": {
+                "type": [
+                  "null",
+                  "array"
+                ],
+                "items": {
+                  "type": "string"
+                },
+                "description": "glob patterns of the databases tools may reach; empty means every database of the cluster"
               },
               "exclude": {
                 "type": [
@@ -241,7 +253,7 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "glob patterns of databases to hide when showAll is set"
+                "description": "glob patterns of databases to hide, subtracted after include"
               }
             },
             "description": "which databases the tools may touch",
@@ -343,11 +355,17 @@
       "properties": {
         "default": {
           "type": "string",
-          "description": "database to connect to, and the only one reachable unless showAll is set"
+          "description": "database the catalog queries connect to; reachable by name only if include and exclude let it through"
         },
-        "showAll": {
-          "type": "boolean",
-          "description": "allow tools into every database of the cluster"
+        "include": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "glob patterns of the databases tools may reach; empty means every database of the cluster"
         },
         "exclude": {
           "type": [
@@ -357,7 +375,7 @@
           "items": {
             "type": "string"
           },
-          "description": "glob patterns of databases to hide when showAll is set"
+          "description": "glob patterns of databases to hide, subtracted after include"
         }
       },
       "description": "which databases the tools may touch",

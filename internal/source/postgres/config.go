@@ -16,6 +16,11 @@ import (
 // and the binary suffix all derive from it.
 const Name = "postgres"
 
+// entryDatabase is the default databases.default: initdb creates it on every
+// cluster, so a config that names no entry point still has one to read the
+// catalog through.
+const entryDatabase = "postgres"
+
 // Config is the whole postgres server config, and — once the core has applied
 // inheritance — the config in effect at one address. The groups the core reads
 // come from the embedded skeleton; the embedded [Cluster] is the global level,
@@ -63,12 +68,14 @@ const (
 	SSLVerifyFull SSLMode = "verify-full"
 )
 
-// Databases bounds what the tools can reach. With showAll off, default is the
-// only database they see.
+// Databases bounds what the tools can reach: an empty include is the whole
+// cluster, a non-empty one only what it names, and exclude is subtracted after.
+// default is neither — it is where a call that names no database connects, and
+// it passes the lists like any other name to be reachable by one.
 type Databases struct {
-	Default string   `json:"default,omitzero" jsonschema:"database to connect to, and the only one reachable unless showAll is set"`
-	ShowAll bool     `json:"showAll,omitzero" jsonschema:"allow tools into every database of the cluster"`
-	Exclude []string `json:"exclude,omitzero" jsonschema:"glob patterns of databases to hide when showAll is set"`
+	Default string   `json:"default,omitzero" jsonschema:"database the catalog queries connect to; reachable by name only if include and exclude let it through"`
+	Include []string `json:"include,omitzero" jsonschema:"glob patterns of the databases tools may reach; empty means every database of the cluster"`
+	Exclude []string `json:"exclude,omitzero" jsonschema:"glob patterns of databases to hide, subtracted after include"`
 }
 
 // Pool caps how much of someone else's server we occupy: maxDatabases times
@@ -102,6 +109,7 @@ func Defaults() Config {
 	c := Config{
 		Cluster: Cluster{
 			Connection: Connection{Port: 5432, SSLMode: SSLPrefer},
+			Databases:  Databases{Default: entryDatabase},
 			Pool: Pool{
 				MaxDatabases:        4,
 				MaxConnsPerDatabase: 2,
@@ -120,7 +128,9 @@ func Defaults() Config {
 }
 
 // Minimal is what --init writes: one environment holding one cluster, with the
-// keys that have no default filled in as placeholders, and nothing else.
+// keys nobody can guess filled in as placeholders, and nothing else.
+// databases.default is one of them although it has a default: postgres is a
+// database that exists, not the entry point a given deployment wants.
 func Minimal() Config {
 	var c Config
 	c.Environments = map[string]mcpsrv.Environment[Cluster]{
@@ -155,11 +165,15 @@ func (c *Config) Validate() error {
 		{"connection.host", c.Connection.Host},
 		{"connection.user", c.Connection.User},
 		{"connection.password", c.Connection.Password},
-		{"databases.default", c.Databases.Default},
 	} {
 		if f.value == "" {
 			return fmt.Errorf("%s: no value at this address, and none inherited", f.key)
 		}
+	}
+	// Not a presence check — the key has a default. An explicit "" overrides it,
+	// and libpq would then read the role name as the database name.
+	if c.Databases.Default == "" {
+		return fmt.Errorf("databases.default: an empty string is not a database; leave the key out for %q", entryDatabase)
 	}
 	// An explicit zero in the file overrides the default, and a pool sized zero
 	// would be quietly rounded up to something that works — a key that does
@@ -176,15 +190,19 @@ func (c *Config) Validate() error {
 	if c.Timeouts.Query <= 0 {
 		return errors.New("timeouts.query: a query needs a limit; the client deadline is derived from it")
 	}
-	for _, pat := range c.Databases.Exclude {
-		ok, err := path.Match(pat, c.Databases.Default)
-		if err != nil {
-			return fmt.Errorf("databases.exclude: %q is not a valid glob: %w", pat, err)
-		}
-		// Showing a database told to hide is a surprise; hiding the one we
-		// connect to is a broken server. Neither may happen silently.
-		if ok {
-			return fmt.Errorf("databases.exclude: %q hides databases.default %q", pat, c.Databases.Default)
+	// path.Match scans the whole pattern before it gives up on a name, so the
+	// empty one is enough to reject a glob that would only ever error at a call.
+	for _, list := range []struct {
+		key      string
+		patterns []string
+	}{
+		{"databases.include", c.Databases.Include},
+		{"databases.exclude", c.Databases.Exclude},
+	} {
+		for _, pat := range list.patterns {
+			if _, err := path.Match(pat, ""); err != nil {
+				return fmt.Errorf("%s: %q is not a valid glob: %w", list.key, pat, err)
+			}
 		}
 	}
 	return nil
