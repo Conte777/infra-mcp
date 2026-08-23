@@ -56,12 +56,7 @@ func runQuery(ctx context.Context, tx pgx.Tx, cfg Config, in sqlArgs) ([]block.B
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if limit > 0 && len(t.Rows) > limit {
-		t.Rows = t.Rows[:limit]
-		t.More = true
-	} else {
-		t.Total = len(t.Rows)
-	}
+	t.Cap(limit)
 	if len(t.Columns) == 0 {
 		return []block.Block{block.Text("the statement returned no columns")}, nil
 	}
@@ -195,11 +190,17 @@ func columnNames(fields []pgconn.FieldDescription) []string {
 	return names
 }
 
-// maxRuneBytes is UTF-8's longest encoding, so a prefix of maxCellChars of them
-// holds at least maxCellChars whole runes: the renderer's rune-exact cap still
-// lands inside what was copied, and the partial rune the cut may leave sits past
-// it and is dropped there.
+// maxRuneBytes is UTF-8's longest encoding, so a prefix of n of them holds at
+// least n whole runes.
 const maxRuneBytes = 4
+
+// cellBytes is what one value may cost: one rune past the budget, so that "this
+// was cut" stays a fact the renderer can see. capCell cuts on longer-than, and a
+// value trimmed to exactly the budget — which four-byte runes hit exactly —
+// would reach the model as a whole one, with neither the ellipsis nor the notice.
+func cellBytes(maxCellChars int) int {
+	return (maxCellChars + 1) * maxRuneBytes
+}
 
 // textRow copies one row of raw values into cells, keeping no more of a value
 // than the renderer can show. Both paths ask postgres for the text format — pgx
@@ -212,8 +213,8 @@ func textRow(raw [][]byte, maxCellChars int) []any {
 		if v == nil {
 			continue // NULL, and the renderer's empty cell
 		}
-		if maxCellChars > 0 && len(v) > maxCellChars*maxRuneBytes {
-			v = v[:maxCellChars*maxRuneBytes]
+		if budget := cellBytes(maxCellChars); maxCellChars > 0 && len(v) > budget {
+			v = v[:budget]
 		}
 		row[i] = string(v)
 	}

@@ -16,6 +16,17 @@ type Table struct {
 	More bool
 }
 
+// Cap trims the row read past limit and settles which of the two the source may
+// claim: a full answer knows its total, a cut one can only say there is more.
+func (t *Table) Cap(limit int) {
+	if limit > 0 && len(t.Rows) > limit {
+		t.Rows = t.Rows[:limit]
+		t.More = true
+		return
+	}
+	t.Total = len(t.Rows)
+}
+
 // Code is a fenced block: DDL, an EXPLAIN plan, a manifest, a log tail.
 type Code struct {
 	Lang string // fence info string ("sql", "yaml"); empty renders a plain fence

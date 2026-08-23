@@ -46,15 +46,14 @@ func listDatabases(ctx context.Context, tx pgx.Tx, cfg Config, _ ConnectionArgs)
 			continue
 		}
 		t.Rows = append(t.Rows, []any{name, value(size), allowsConnections, value(comment)})
-		// One row past the budget, so that "there is more" is a fact and not a guess.
-		if limit > 0 && len(t.Rows) > limit {
+		if limit > 0 && len(t.Rows) > limit { // one row past the budget, as the cursor does
 			break
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	capRows(&t, limit)
+	t.Cap(limit)
 	return []block.Block{t}, nil
 }
 
@@ -86,8 +85,7 @@ func listTables(ctx context.Context, tx pgx.Tx, cfg Config, in listTablesArgs) (
 	limit := cfg.Output.MaxRows
 	var fetch *int64
 	if limit > 0 {
-		// One row past the budget, so that "there is more" is a fact and not a guess.
-		n := int64(limit) + 1
+		n := int64(limit) + 1 // one row past the budget, as the cursor does
 		fetch = &n
 	}
 
@@ -110,19 +108,8 @@ func listTables(ctx context.Context, tx pgx.Tx, cfg Config, in listTablesArgs) (
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	capRows(&t, limit)
+	t.Cap(limit)
 	return []block.Block{t}, nil
-}
-
-// capRows trims the row read past the budget: what is left is a full answer with
-// a total, or a cut one that can only say there is more.
-func capRows(t *block.Table, limit int) {
-	if limit > 0 && len(t.Rows) > limit {
-		t.Rows = t.Rows[:limit]
-		t.More = true
-		return
-	}
-	t.Total = len(t.Rows)
 }
 
 // value unwraps a nullable column into a cell. A typed nil pointer is not the

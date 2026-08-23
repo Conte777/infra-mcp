@@ -1,8 +1,8 @@
 package postgres
 
 import (
+	"fmt"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,8 +16,10 @@ func TestDescribeSchemaNamesTheCeilingItEnforces(t *testing.T) {
 		t.Fatal("describeArgs has no Tables field")
 	}
 
+	// The whole phrase, not the number alone: "at most 20" contains "2", so a
+	// ceiling lowered to two would leave the schema promising twenty unchecked.
 	schema := field.Tag.Get("jsonschema")
-	if want := strconv.Itoa(maxTablesDescribed); !strings.Contains(schema, want) {
-		t.Errorf("the tables schema %q does not name the ceiling of %s", schema, want)
+	if want := fmt.Sprintf("at most %d", maxTablesDescribed); !strings.Contains(schema, want) {
+		t.Errorf("the tables schema %q does not say %q", schema, want)
 	}
 }
