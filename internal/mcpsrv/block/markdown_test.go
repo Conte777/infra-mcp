@@ -231,6 +231,24 @@ func TestCodeTruncatesFromTheTail(t *testing.T) {
 	}
 }
 
+// A source that stopped reading has the only honest count of what it saw; the
+// text it handed over no longer carries it.
+func TestCodeTotalNamesTheLinesTheSourceDropped(t *testing.T) {
+	out := Markdown([]Block{Code{Lang: "text", Text: "one\ntwo\n", Total: 500}}, Budget{})
+
+	if !strings.Contains(out, "Showing the first 2 of 500 lines") {
+		t.Fatalf("the lines the source never kept went unreported: %q", out)
+	}
+}
+
+func TestCodeTotalBelowWhatArrivedIsIgnored(t *testing.T) {
+	out := Markdown([]Block{Code{Text: "one\ntwo\n", Total: 1}}, Budget{})
+
+	if strings.Contains(out, "Showing") {
+		t.Fatalf("a total under the lines in hand invented a truncation: %q", out)
+	}
+}
+
 func TestKeyValuesAndText(t *testing.T) {
 	out := Markdown([]Block{
 		KeyValues{{Key: "profile", Value: "default"}, {Key: "config", Value: "/etc/x.json"}},

@@ -20,6 +20,8 @@ type Table struct {
 type Code struct {
 	Lang string // fence info string ("sql", "yaml"); empty renders a plain fence
 	Text string
+	// Lines the source read before it stopped keeping them; zero or less means Text is whole.
+	Total int
 }
 
 // Pair is one entry of a KeyValues block.

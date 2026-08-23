@@ -153,7 +153,12 @@ func renderCode(c Code, limit int) rendered {
 	tail := fence + "\n"
 
 	lines := splitLines(c.Text)
-	shown, notice := fitWithNotice(len(head)+len(tail), lines, limit, len(lines), linesNotice)
+	total := max(c.Total, len(lines))
+	shown, notice := fitWithNotice(len(head)+len(tail), lines, limit, total, linesNotice)
+	// The source stopped reading with lines left, and every one it kept still fit.
+	if notice == "" && total > len(lines) {
+		notice = linesNotice(shown, total)
+	}
 	return rendered{text: head + strings.Join(lines[:shown], "") + tail, notice: notice}
 }
 

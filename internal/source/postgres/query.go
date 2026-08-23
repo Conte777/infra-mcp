@@ -48,7 +48,7 @@ func runQuery(ctx context.Context, tx pgx.Tx, cfg Config, in sqlArgs) ([]block.B
 
 	t := block.Table{Columns: columnNames(rows.FieldDescriptions())}
 	for rows.Next() {
-		t.Rows = append(t.Rows, textRow(rows.RawValues()))
+		t.Rows = append(t.Rows, textRow(rows.RawValues(), cfg.Output.MaxCellChars))
 		if limit > 0 && len(t.Rows) > limit {
 			break
 		}
@@ -96,18 +96,25 @@ func explain(ctx context.Context, tx pgx.Tx, cfg Config, in explainArgs) ([]bloc
 	defer rows.Close()
 
 	var plan strings.Builder
+	lines := 0
 	for rows.Next() {
 		var line string
 		if err := rows.Scan(&line); err != nil {
 			return nil, err
 		}
-		plan.WriteString(line)
-		plan.WriteString("\n")
+		lines++
+		// The rows arrive whether or not they are kept, so the cap is on what is
+		// held: a plan already past the whole response budget cannot be shown,
+		// and reading on is what lets the notice name a total instead of a guess.
+		if cfg.Output.MaxBytes <= 0 || plan.Len() < cfg.Output.MaxBytes {
+			plan.WriteString(line)
+			plan.WriteString("\n")
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return []block.Block{block.Code{Lang: "text", Text: plan.String()}}, nil
+	return []block.Block{block.Code{Lang: "text", Text: plan.String(), Total: lines}}, nil
 }
 
 // execute goes through PgConn rather than tx.Exec: it is the same simple
@@ -125,7 +132,7 @@ func execute(ctx context.Context, tx pgx.Tx, cfg Config, in sqlArgs) ([]block.Bl
 	var tags []string
 	for mrr.NextResult() {
 		rr := mrr.ResultReader()
-		if t, ok := returnedRows(rr, cfg.Output.MaxRows); ok {
+		if t, ok := returnedRows(rr, cfg.Output); ok {
 			blocks = append(blocks, t)
 		}
 		tag, err := rr.Close()
@@ -161,18 +168,19 @@ func execute(ctx context.Context, tx pgx.Tx, cfg Config, in sqlArgs) ([]block.Bl
 // returnedRows drains one result, collecting what RETURNING produced. The rows
 // exist whether or not they are read, so the cap is on what is kept, not on what
 // is read: the tag comes only after the last row.
-func returnedRows(rr *pgconn.ResultReader, limit int) (block.Table, bool) {
+func returnedRows(rr *pgconn.ResultReader, out mcpsrv.Output) (block.Table, bool) {
 	fields := rr.FieldDescriptions()
 	if len(fields) == 0 {
 		return block.Table{}, false
 	}
 
+	limit := out.MaxRows
 	t := block.Table{Columns: columnNames(fields)}
 	read := 0
 	for rr.NextRow() {
 		read++
 		if limit <= 0 || len(t.Rows) <= limit {
-			t.Rows = append(t.Rows, textRow(rr.Values()))
+			t.Rows = append(t.Rows, textRow(rr.Values(), out.MaxCellChars))
 		}
 	}
 	t.Total = read
@@ -187,15 +195,25 @@ func columnNames(fields []pgconn.FieldDescription) []string {
 	return names
 }
 
-// textRow copies one row of raw values into cells. Both paths ask postgres for
-// the text format — pgx leaves the result formats empty under QueryExecModeExec,
-// and the simple protocol has no other — so a value reads exactly as postgres
-// writes it. The copy is required: the driver reuses the buffer.
-func textRow(raw [][]byte) []any {
+// maxRuneBytes is UTF-8's longest encoding, so a prefix of maxCellChars of them
+// holds at least maxCellChars whole runes: the renderer's rune-exact cap still
+// lands inside what was copied, and the partial rune the cut may leave sits past
+// it and is dropped there.
+const maxRuneBytes = 4
+
+// textRow copies one row of raw values into cells, keeping no more of a value
+// than the renderer can show. Both paths ask postgres for the text format — pgx
+// leaves the result formats empty under QueryExecModeExec, and the simple
+// protocol has no other — so a value reads exactly as postgres writes it. The
+// copy is required: the driver reuses the buffer.
+func textRow(raw [][]byte, maxCellChars int) []any {
 	row := make([]any, len(raw))
 	for i, v := range raw {
 		if v == nil {
 			continue // NULL, and the renderer's empty cell
+		}
+		if maxCellChars > 0 && len(v) > maxCellChars*maxRuneBytes {
+			v = v[:maxCellChars*maxRuneBytes]
 		}
 		row[i] = string(v)
 	}
