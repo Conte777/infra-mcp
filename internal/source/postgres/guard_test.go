@@ -237,6 +237,78 @@ func TestCalledNames(t *testing.T) {
 	}
 }
 
+// scannable decides what both later checks even see, so its cases are about
+// what survives it, not about tidiness.
+func TestScannable(t *testing.T) {
+	tests := []struct{ name, sql, want string }{
+		{"lowercased", "SELECT PG_Read_File('/e')", "select pg_read_file('/e')"},
+		{"line comment becomes a space", "select 1 -- pg_read_file\nfrom t", "select 1  \nfrom t"},
+		{"line comment running to the end", "select 1 -- pg_read_file", "select 1  "},
+		{"block comment becomes a space", "select pg_read_file/**/('/e')", "select pg_read_file ('/e')"},
+		{"nested block comment", "select/* a /* b */ c */1", "select 1"},
+		{"unterminated block comment", "select/* forever", "select "},
+		{"quoting marks drop out", `select "pg_read_file"('/e')`, "select pg_read_file('/e')"},
+		{"a comment inside a name splits it", "select pg_read/**/_file()", "select pg_read _file()"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scannable(tt.sql); got != tt.want {
+				t.Errorf("scannable(%q) = %q, want %q", tt.sql, got, tt.want)
+			}
+		})
+	}
+}
+
+// The second lock over COPY, read through scannable the way guardRead reads it.
+func TestCopiesToProgram(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"to program", "COPY t TO PROGRAM 'sh -c evil'", true},
+		{"from program", "COPY t FROM PROGRAM 'cat /etc/shadow'", true},
+		{"the literal abuts the keyword", "COPY t TO PROGRAM'sh -c evil'", true},
+		{"already lower case", "copy t to program 'x'", true},
+		{"newlines and tabs between the words", "COPY t\n\tTO\n\tPROGRAM\t'x'", true},
+		{"a comment between to and program", "COPY t TO/**/PROGRAM 'x'", true},
+		// Postgres rejects this one as a syntax error; the lock does not have to
+		// know that to refuse it.
+		{"dollar quoting abuts the keyword", "COPY t TO PROGRAM$$x$$", true},
+		{"copy without a program", "COPY t TO STDOUT", false},
+		{"copy from a file is not a program", "COPY t FROM '/tmp/f'", false},
+		{"program without the preposition", "COPY t TO STDOUT -- program", false},
+		{"program is the first word", "PROGRAM copy to stdout", false},
+		{"program without a copy", "SELECT * FROM t WHERE note = 'send to program'", false},
+		{"the words in the wrong order", "SELECT 'program to copy'", false},
+		// The price of scanning string literals: deniedCall pays it too, and a
+		// call hiding behind a quote is what neither may miss.
+		{"a literal that reads like a copy", "SELECT 'copy the log to program dir'", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := copiesToProgram(scannable(tt.sql)); got != tt.want {
+				t.Errorf("copiesToProgram(scannable(%q)) = %v, want %v", tt.sql, got, tt.want)
+			}
+		})
+	}
+}
+
+// A real COPY never reaches the second lock — the keyword check takes it first —
+// so a string literal is the only way to watch the lock refuse on its own.
+func TestTheSecondLockOverCopyRefusesOnItsOwn(t *testing.T) {
+	var f *mcpsrv.Failure
+	if !errors.As(guardRead(Defaults(), "SELECT 'copy t to program ''sh -c evil'''"), &f) {
+		t.Fatal("a statement carrying COPY … TO PROGRAM must fail")
+	}
+	if f.Kind != mcpsrv.KindDenied {
+		t.Errorf("kind = %v, want %v", f.Kind, mcpsrv.KindDenied)
+	}
+	if !strings.Contains(f.Detail, "PROGRAM") {
+		t.Errorf("detail = %q, want it to name what it refused", f.Detail)
+	}
+}
+
 // The guard is the layer that must not be silent: a refusal names what it
 // refused, or the model retries the same statement.
 func TestGuardRefusalNamesTheReason(t *testing.T) {

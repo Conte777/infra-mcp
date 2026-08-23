@@ -237,13 +237,18 @@ func applied(rest string) bool {
 	return strings.HasPrefix(strings.TrimLeftFunc(rest, unicode.IsSpace), "(")
 }
 
+// copiesToProgram reports whether scan runs COPY … TO/FROM PROGRAM. Words are
+// runs of word runes, not whitespace-separated fields: postgres lets the
+// literal abut the keyword, so PROGRAM'sh -c evil' is one field but two words.
+// A match inside a string literal costs a refusal on a query that merely reads
+// "… to program …", the trade deniedCall already makes.
 func copiesToProgram(scan string) bool {
-	fields := strings.Fields(scan)
-	if !slices.Contains(fields, "copy") || !slices.Contains(fields, "program") {
+	words := strings.FieldsFunc(scan, func(r rune) bool { return !isWordRune(r) })
+	if !slices.Contains(words, "copy") {
 		return false
 	}
-	for i, f := range fields {
-		if i > 0 && f == "program" && (fields[i-1] == "to" || fields[i-1] == "from") {
+	for i, w := range words {
+		if i > 0 && w == "program" && (words[i-1] == "to" || words[i-1] == "from") {
 			return true
 		}
 	}
@@ -252,4 +257,10 @@ func copiesToProgram(scan string) bool {
 
 func isIdentRune(r rune) bool {
 	return r == '_' || r == '$' || unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// isWordRune is [isIdentRune] without "$", which has to end a word so that
+// program$$sh$$ is two of them.
+func isWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
