@@ -23,6 +23,7 @@ func TestFirstKeyword(t *testing.T) {
 		{"parenthesised query", "((SELECT 1) UNION (SELECT 2))", "select"},
 		{"empty", "   \n\t ", ""},
 		{"write", "delete from t", "delete"},
+		{"nothing after the keyword", "select", "select"},
 	}
 
 	for _, tt := range tests {
@@ -234,6 +235,84 @@ func TestCalledNames(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// scannable decides what both later checks even see (#65). The forms
+// TestGuardRead already drives end to end are repeated here on purpose: there
+// they say a call is refused, here they say what the text became.
+func TestScannable(t *testing.T) {
+	tests := []struct{ name, sql, want string }{
+		{"lowercased", "SELECT PG_Read_File('/e')", "select pg_read_file('/e')"},
+		{"line comment becomes a space", "select 1 -- pg_read_file\nfrom t", "select 1  \nfrom t"},
+		{"line comment running to the end", "select 1 -- pg_read_file", "select 1  "},
+		{"block comment becomes a space", "select pg_read_file/**/('/e')", "select pg_read_file ('/e')"},
+		{"nested block comment", "select/* a /* b */ c */1", "select 1"},
+		{"unterminated block comment", "select/* forever", "select "},
+		{"quoting marks drop out", `select "pg_read_file"('/e')`, "select pg_read_file('/e')"},
+		{"a comment inside a name splits it", "select pg_read/**/_file()", "select pg_read _file()"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scannable(tt.sql); got != tt.want {
+				t.Errorf("scannable(%q) = %q, want %q", tt.sql, got, tt.want)
+			}
+		})
+	}
+}
+
+// The second lock over COPY (#65), read through scannable the way guardRead
+// reads it: the branches are unreachable from guardRead, so they are pinned at
+// the level they run at.
+func TestCopiesToProgram(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"to program", "COPY t TO PROGRAM 'sh -c evil'", true},
+		{"from program", "COPY t FROM PROGRAM 'cat /etc/shadow'", true},
+		{"the literal abuts the keyword", "COPY t TO PROGRAM'sh -c evil'", true},
+		{"already lower case", "copy t to program 'x'", true},
+		{"newlines and tabs between the words", "COPY t\n\tTO\n\tPROGRAM\t'x'", true},
+		{"a comment between to and program", "COPY t TO/**/PROGRAM 'x'", true},
+		// Only a quote ends the word, so the dollar-quoted form reads as one —
+		// postgres rejects it as a syntax error anyway.
+		{"dollar quoting abuts the keyword", "COPY t TO PROGRAM$$x$$", false},
+		// A schema qualification is not a word boundary either, or a table named
+		// program would be unreadable.
+		{"a table called program", "SELECT * FROM program.copy", false},
+		{"copy without a program", "COPY t TO STDOUT", false},
+		{"copy from a file is not a program", "COPY t FROM '/tmp/f'", false},
+		{"program without the preposition", "COPY program TO STDOUT", false},
+		{"program is the first word", "PROGRAM copy to stdout", false},
+		{"program without a copy", "SELECT * FROM t WHERE note = 'send to program'", false},
+		{"the words in the wrong order", "SELECT 'program to copy'", false},
+		// The price of scanning string literals: deniedCall pays it too, and a
+		// call hiding behind a quote is what neither may miss.
+		{"a literal that reads like a copy", "SELECT 'copy the log to program dir'", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := copiesToProgram(scannable(tt.sql)); got != tt.want {
+				t.Errorf("copiesToProgram(scannable(%q)) = %v, want %v", tt.sql, got, tt.want)
+			}
+		})
+	}
+}
+
+// A real COPY never reaches the second lock — the keyword check takes it first —
+// so a string literal is the only way to watch the lock refuse on its own.
+func TestSecondLockOverCopyStandsAlone(t *testing.T) {
+	var f *mcpsrv.Failure
+	if !errors.As(guardRead(Defaults(), "SELECT 'copy t to program ''sh -c evil'''"), &f) {
+		t.Fatal("a statement carrying COPY … TO PROGRAM must fail")
+	}
+	if f.Kind != mcpsrv.KindDenied {
+		t.Errorf("kind = %v, want %v", f.Kind, mcpsrv.KindDenied)
+	}
+	if !strings.Contains(f.Detail, "PROGRAM") {
+		t.Errorf("detail = %q, want it to name what it refused", f.Detail)
 	}
 }
 

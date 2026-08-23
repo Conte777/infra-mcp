@@ -237,13 +237,18 @@ func applied(rest string) bool {
 	return strings.HasPrefix(strings.TrimLeftFunc(rest, unicode.IsSpace), "(")
 }
 
+// copiesToProgram reports whether scan runs COPY … TO/FROM PROGRAM. A quote
+// ends a word as whitespace does: postgres lets the literal abut the keyword,
+// so PROGRAM'sh -c evil' is one field but two words. The quote also ends the
+// word it opens, which is why a literal reading "… copy … to program …" is
+// refused too — the price of scanning literals that deniedCall already pays.
 func copiesToProgram(scan string) bool {
-	fields := strings.Fields(scan)
-	if !slices.Contains(fields, "copy") || !slices.Contains(fields, "program") {
+	words := strings.FieldsFunc(scan, func(r rune) bool { return unicode.IsSpace(r) || r == '\'' })
+	if !slices.Contains(words, "copy") {
 		return false
 	}
-	for i, f := range fields {
-		if i > 0 && f == "program" && (fields[i-1] == "to" || fields[i-1] == "from") {
+	for i, w := range words {
+		if i > 0 && w == "program" && (words[i-1] == "to" || words[i-1] == "from") {
 			return true
 		}
 	}
