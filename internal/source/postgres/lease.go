@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,7 +25,11 @@ type Input interface {
 	// whose accessor is unexported to this package; it comes off the embedded
 	// field instead.
 	cluster() mcpsrv.Address
-	database() string
+	// database is the database the call names, and whether it names one at all.
+	// The second half is the tool's shape, not its arguments: a tool about the
+	// cluster runs in the entry point, and no string a model sends can ask for
+	// that.
+	database() (string, bool)
 }
 
 // Args is what every tool carries: the cluster the core addresses, and the
@@ -38,17 +43,18 @@ type Args struct {
 
 func (a Args) cluster() mcpsrv.Address { return a.Address }
 
-func (a Args) database() string { return a.Database }
+func (a Args) database() (string, bool) { return a.Database, true }
 
 // ConnectionArgs is for a tool that asks about a cluster as a whole rather than
-// about one database; it runs in that cluster's databases.default.
+// about one database; it runs in that cluster's databases.default, which is why
+// that key is an entry point and not one more reachable database.
 type ConnectionArgs struct {
 	mcpsrv.Address
 }
 
 func (a ConnectionArgs) cluster() mcpsrv.Address { return a.Address }
 
-func (ConnectionArgs) database() string { return "" }
+func (ConnectionArgs) database() (string, bool) { return "", false }
 
 // TxFunc is a tool handler. The transaction is already open, already limited by
 // SET LOCAL and, for a read tool, already READ ONLY — and there is no way from
@@ -82,7 +88,8 @@ func inTx[In Input](s *Source, mode pgx.TxAccessMode, h TxFunc[In]) mcpsrv.Handl
 			}
 		}
 
-		db, err := resolveDatabase(cfg, in.database())
+		name, named := in.database()
+		db, err := resolveDatabase(cfg, name, named)
 		if err != nil {
 			return nil, err
 		}
@@ -151,32 +158,62 @@ func millis(d mcpsrv.Duration) string {
 	return strconv.FormatInt(d.Duration().Milliseconds(), 10)
 }
 
+// listHint is what a refused database argument is answered with: the tool that
+// prints exactly the databases this address does reach.
+const listHint = "pg_read_list_databases shows the databases this address reaches"
+
 // resolveDatabase turns the database argument into the database to connect to.
-// An empty argument is the configured default, so a tool about the connection
-// as a whole needs no argument at all.
-func resolveDatabase(cfg Config, name string) (string, error) {
-	def := cfg.Databases.Default
-	if name == "" || name == def {
-		return def, nil
+// A tool that names none runs in databases.default: the catalog is not readable
+// without being connected to something, and that is the only thing the lists do
+// not decide. A named database is checked against them whether or not it is the
+// default — an include naming one database must not quietly yield two.
+func resolveDatabase(cfg Config, name string, named bool) (string, error) {
+	if !named {
+		return cfg.Databases.Default, nil
+	}
+
+	// The schema marks the argument required, which says nothing about it being
+	// non-empty — and an empty dbname makes libpq read the role name as one.
+	if name == "" {
+		return "", &mcpsrv.Failure{
+			Kind:   mcpsrv.KindBadArgument,
+			Detail: "the database argument is empty",
+			Hint:   listHint,
+		}
 	}
 
 	denied := func(detail, hint string) (string, error) {
 		return "", &mcpsrv.Failure{Kind: mcpsrv.KindDenied, Detail: detail, Hint: hint}
 	}
 
-	if !cfg.Databases.ShowAll {
-		return denied(
-			fmt.Sprintf("this server is configured to reach only %q", def),
-			"set databases.showAll in the config to reach the rest of the cluster")
-	}
-	for _, pat := range cfg.Databases.Exclude {
-		// The patterns were checked when the config loaded, so a match error is
-		// not reachable here.
-		if ok, _ := path.Match(pat, name); ok {
+	if inc := cfg.Databases.Include; len(inc) > 0 {
+		if _, ok := matches(inc, name); !ok {
 			return denied(
-				fmt.Sprintf("database %q is hidden by databases.exclude (%q)", name, pat),
-				"")
+				fmt.Sprintf("database %q is not among the ones databases.include names", name),
+				listHint)
 		}
+	}
+	if pat, ok := matches(cfg.Databases.Exclude, name); ok {
+		return denied(fmt.Sprintf("database %q is hidden by databases.exclude (%q)", name, pat), listHint)
 	}
 	return name, nil
 }
+
+// matches is the first pattern name matches. The patterns were checked when the
+// config loaded, so a match error is not reachable here.
+func matches(patterns []string, name string) (string, bool) {
+	name = flatten(name)
+	for _, pat := range patterns {
+		if ok, _ := path.Match(flatten(pat), name); ok {
+			return pat, true
+		}
+	}
+	return "", false
+}
+
+// flatten takes "/" out of path.Match's way. A database name is not a path, and
+// a quoted identifier may hold a slash — but * and ? refuse to cross one, so
+// exclude: ["tmp_*"] would let "tmp_a/b" through, which is the wrong direction
+// for a filter to fail in. NUL is the one byte an identifier cannot hold, so
+// standing it in on both sides settles the question rather than hiding it.
+func flatten(s string) string { return strings.ReplaceAll(s, "/", "\x00") }

@@ -57,6 +57,57 @@ func TestSchemaMatchesCommittedFile(t *testing.T) {
 	}
 }
 
+// databases has no exception in the core's inheritance: which databases a
+// cluster shows is written once where it holds, and a cluster that means
+// something else says so.
+func TestLoadInheritsDatabases(t *testing.T) {
+	t.Setenv("INFRA_MCP_TEST_PASSWORD", "secret")
+	inv := load(t, `{
+	  "connection": {"host": "h", "user": "u", "password": "${INFRA_MCP_TEST_PASSWORD}"},
+	  "databases": {"exclude": ["tmp_*"]},
+	  "environments": {
+	    "dev": {
+	      "databases": {"default": "app_db", "include": ["app_*"]},
+	      "clusters": {
+	        "main":      {},
+	        "reporting": {"databases": {"include": ["reports"]}}
+	      }
+	    }
+	  }
+	}`)
+
+	main := find(t, inv, devMain)
+	if main.Databases.Default != "app_db" {
+		t.Errorf("dev/main default = %q, want the environment's", main.Databases.Default)
+	}
+	if len(main.Databases.Exclude) != 1 || main.Databases.Exclude[0] != "tmp_*" {
+		t.Errorf("dev/main exclude = %v, want the global one", main.Databases.Exclude)
+	}
+
+	reporting := find(t, inv, mcpsrv.Address{Environment: "dev", Cluster: "reporting"})
+	// A list is replaced whole, never merged: half an include is a white list
+	// nobody wrote.
+	if len(reporting.Databases.Include) != 1 || reporting.Databases.Include[0] != "reports" {
+		t.Errorf("dev/reporting include = %v, want its own alone", reporting.Databases.Include)
+	}
+	if reporting.Databases.Default != "app_db" {
+		t.Errorf("dev/reporting default = %q, want the environment's", reporting.Databases.Default)
+	}
+}
+
+// The entry point is what a catalog query connects through, and a config that
+// names none still has to have one.
+func TestLoadDefaultsTheEntryPoint(t *testing.T) {
+	t.Setenv("INFRA_MCP_TEST_PASSWORD", "secret")
+	cfg := mustLoad(t, oneCluster(`{
+	  "connection": {"host": "h", "user": "u", "password": "${INFRA_MCP_TEST_PASSWORD}"}
+	}`)).Config
+
+	if cfg.Databases.Default != "postgres" {
+		t.Errorf("databases.default = %q, want the built-in entry point", cfg.Databases.Default)
+	}
+}
+
 func TestLoadAppliesFileOnTopOfDefaults(t *testing.T) {
 	t.Setenv("INFRA_MCP_TEST_PASSWORD", "secret")
 
@@ -222,7 +273,12 @@ func TestLoadRejects(t *testing.T) {
 		},
 		{
 			name:   "a key nothing supplies at any level",
-			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"}}`),
+			body:   oneCluster(`{"connection":{"user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"}}`),
+			reason: "connection.host",
+		},
+		{
+			name:   "an entry point emptied on purpose",
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":""}}`),
 			reason: "databases.default",
 		},
 		{
@@ -253,9 +309,21 @@ func TestLoadRejects(t *testing.T) {
 			reason: "sslmode",
 		},
 		{
-			name:   "exclude hiding the default database",
-			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"default":"app_db","showAll":true,"exclude":["app_*"]}}`),
+			// The pattern would otherwise only ever fail at a tool call, where
+			// nothing can be done about it.
+			name:   "a glob that does not parse",
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"exclude":["tmp_["]}}`),
 			reason: "databases.exclude",
+		},
+		{
+			name:   "a glob that does not parse in include",
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"include":["[a-"]}}`),
+			reason: "databases.include",
+		},
+		{
+			name:   "a key that is gone",
+			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"},"databases":{"showAll":true}}`),
+			reason: "showAll",
 		},
 		{
 			name:   "a pool of no databases",
