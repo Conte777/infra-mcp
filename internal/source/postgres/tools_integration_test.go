@@ -561,6 +561,35 @@ func TestQueryRefusesAWriteBeforeItReachesTheServer(t *testing.T) {
 	wantKind(t, err, mcpsrv.KindDenied)
 }
 
+// One call per deny-list family, run through the real read tool: what the guard
+// refuses in guard_test is a list of names, and this is the promise that the
+// refusal lands before the statement reaches the server — through pg_read_query,
+// the tool the README calls safe by construction (#66).
+func TestQueryRefusesEveryDenyListFamilyBeforeItReachesTheServer(t *testing.T) {
+	s, cfg := testSource(t, nil)
+
+	families := map[string]string{
+		"server files":        "SELECT pg_read_file('/etc/passwd')",
+		"the pg_ls family":    "SELECT pg_ls_waldir()",
+		"adminpack writes":    "SELECT pg_file_write('/root/.ssh/authorized_keys', 'key', false)",
+		"large objects":       "SELECT lo_import('/etc/passwd')",
+		"dblink":              "SELECT dblink_connect('host=10.0.0.1 port=22')",
+		"backends":            "SELECT pg_terminate_backend(1)",
+		"session locks":       "SELECT pg_advisory_lock(42)",
+		"statistics":          "SELECT pg_stat_reset()",
+		"replication slots":   "SELECT pg_drop_replication_slot('s')",
+		"wal":                 "SELECT pg_switch_wal()",
+		"the lease's timeout": "SELECT set_config('statement_timeout', '0', true)",
+	}
+
+	for family, sql := range families {
+		t.Run(family, func(t *testing.T) {
+			_, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: sql}, runQuery)
+			wantKind(t, err, mcpsrv.KindDenied)
+		})
+	}
+}
+
 // The keyword check only reads the first statement, so the READ ONLY transaction
 // is what has to hold — and a COMMIT smuggled into a second statement would end
 // it, leaving the rest to run and commit on its own.

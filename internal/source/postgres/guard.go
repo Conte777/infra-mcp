@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 	"unicode"
@@ -17,17 +18,41 @@ var readableStatements = []string{"select", "with", "table", "values", "show", "
 
 // denyFunctions act outside the transactional model, which is exactly what READ
 // ONLY does not stop; and a dev database is often reached as a superuser, so
-// privileges do not stop them either (ADR-0001). Config only adds to the list.
+// privileges do not stop them either (ADR-0001). Entries are globs matched
+// against the called name, so a family closes in one line and stays closed when
+// postgres adds to it; a family is globbed only where every member belongs on
+// the list — pg_advisory_* would take the xact locks, which the rollback
+// releases. Config only adds to the list.
 var denyFunctions = []string{
-	"pg_terminate_backend", "pg_cancel_backend",
-	"pg_read_file", "pg_read_binary_file", "pg_stat_file", "pg_ls_dir",
-	"pg_reload_conf", "pg_rotate_logfile",
+	// Server files: pg_read_* is the two readers, pg_file_* and pg_logdir_ls are
+	// adminpack's writers.
+	"pg_read_*", "pg_stat_file", "pg_ls_*",
+	"pg_file_*", "pg_logdir_ls",
 	"lo_import", "lo_export",
-	"dblink", "dblink_exec", "dblink_open", "dblink_send_query",
+	// dblink opens a libpq connection from the database host to any host:port,
+	// and the error text carries the answer back. The bare name needs its own
+	// entry: dblink_* does not match it.
+	"dblink", "dblink_*",
+	"pg_terminate_backend", "pg_cancel_backend",
+	"pg_reload_conf", "pg_rotate_logfile", "pg_promote",
 	// A session-level advisory lock outlives the rollback and goes back into the
 	// pool held, blocking everyone who takes the same key.
 	"pg_advisory_lock", "pg_advisory_lock_shared",
 	"pg_try_advisory_lock", "pg_try_advisory_lock_shared",
+	// Statistics do not come back once reset, and reading a logical slot
+	// advances it, which breaks whoever replicates from it.
+	"pg_stat_reset*",
+	"pg_logical_slot_*", "pg_replication_origin_*",
+	"pg_drop_replication_slot", "pg_replication_slot_advance",
+	"pg_create_logical_replication_slot", "pg_create_physical_replication_slot",
+	"pg_copy_logical_replication_slot", "pg_copy_physical_replication_slot",
+	"pg_sync_replication_slots",
+	// pg_backup_start/stop are named pg_start_backup/pg_stop_backup before 15,
+	// and the README promises 14.
+	"pg_switch_wal", "pg_create_restore_point",
+	"pg_backup_start", "pg_backup_stop", "pg_start_backup", "pg_stop_backup",
+	"pg_wal_replay_pause", "pg_wal_replay_resume",
+	"pg_import_system_collations",
 	// set_config is how a read statement turns off the statement_timeout the
 	// lease just set on it.
 	"set_config",
@@ -48,11 +73,12 @@ func guardRead(cfg Config, sql string) error {
 		}
 	}
 	scan := scannable(sql)
-	if name := deniedCall(cfg, scan); name != "" {
+	if name, pattern := deniedCall(cfg, scan); name != "" {
 		return &mcpsrv.Failure{
-			Kind:   mcpsrv.KindDenied,
-			Detail: fmt.Sprintf("%s() has effects a read-only transaction does not undo, so it is on the deny list", name),
-			Hint:   "if this server should be allowed to call it, the deny list is not the place — that call is not a read",
+			Kind: mcpsrv.KindDenied,
+			Detail: fmt.Sprintf("%s() has effects a read-only transaction does not undo, so it is on the deny list (%s)",
+				name, pattern),
+			Hint: "if this server should be allowed to call it, the deny list is not the place — that call is not a read",
 		}
 	}
 	// COPY cannot start a readable statement and cannot be nested in one, so the
@@ -148,38 +174,47 @@ func scannable(sql string) string {
 // String literals are left in on purpose: a name matched inside one costs a
 // refusal on a legitimate query, while skipping the literal would let a call
 // hide behind a quote.
-func deniedCall(cfg Config, scan string) string {
-	for _, name := range slices.Concat(denyFunctions, cfg.Tools.Read.ExtraDenyFunctions) {
-		if calls(scan, strings.ToLower(strings.TrimSpace(name))) {
-			return name
+func deniedCall(cfg Config, scan string) (name, pattern string) {
+	patterns := slices.Concat(denyFunctions, cfg.Tools.Read.ExtraDenyFunctions)
+	for _, call := range calledNames(scan) {
+		for _, pat := range patterns {
+			pat = strings.ToLower(strings.TrimSpace(pat))
+			if ok, _ := path.Match(flatten(pat), flatten(call)); ok {
+				return call, pat
+			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
-// calls reports whether sql calls name: the bare identifier followed by "(".
-// Requiring the parenthesis keeps a row that merely contains the word out of the
-// deny list, and a schema qualification does not hide the call — "." is not an
-// identifier character. A call through a view or a function body is invisible.
-func calls(sql, name string) bool {
-	if name == "" {
-		return false
-	}
-	for i := 0; i < len(sql); {
-		j := strings.Index(sql[i:], name)
-		if j < 0 {
-			return false
-		}
-		at := i + j
-		i = at + len(name)
-		if at > 0 && isIdentRune(rune(sql[at-1])) {
+// calledNames is every identifier sql applies to arguments: the bare name
+// followed by "(". Requiring the parenthesis keeps a row that merely contains
+// the word off the deny list, and a schema qualification does not hide the call
+// — "." is not an identifier character, so pg_catalog.pg_ls_dir is scanned as
+// pg_ls_dir. A call through a view or a function body is invisible.
+func calledNames(sql string) []string {
+	var names []string
+	start := -1
+	for i, r := range sql {
+		if isIdentRune(r) {
+			if start < 0 {
+				start = i
+			}
 			continue
 		}
-		if strings.HasPrefix(strings.TrimLeftFunc(sql[i:], unicode.IsSpace), "(") {
-			return true
+		if start >= 0 && applied(sql[i:]) {
+			names = append(names, sql[start:i])
 		}
+		start = -1
 	}
-	return false
+	return names
+}
+
+// applied reports whether the identifier that just ended is followed by its
+// argument list. The scan runs on [scannable] output, where a comment is already
+// a space, so pg_read_file/**/() is one call.
+func applied(rest string) bool {
+	return strings.HasPrefix(strings.TrimLeftFunc(rest, unicode.IsSpace), "(")
 }
 
 func copiesToProgram(scan string) bool {

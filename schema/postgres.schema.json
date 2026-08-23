@@ -49,7 +49,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "function names to add to the built-in deny list"
+              "description": "globs of function names to add to the built-in deny list"
             }
           },
           "description": "read tools",

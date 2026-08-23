@@ -99,7 +99,7 @@ type Timeouts struct {
 type ReadTools struct {
 	// ExtraDenyFunctions only ever adds: the built-in list is not printed into
 	// the config file, so nobody is invited to edit it down.
-	ExtraDenyFunctions []string `json:"extraDenyFunctions,omitzero" jsonschema:"function names to add to the built-in deny list"`
+	ExtraDenyFunctions []string `json:"extraDenyFunctions,omitzero" jsonschema:"globs of function names to add to the built-in deny list"`
 }
 
 // Defaults is the config each level of a file is applied on top of. Cluster
@@ -198,6 +198,9 @@ func (c *Config) Validate() error {
 	}{
 		{"databases.include", c.Databases.Include},
 		{"databases.exclude", c.Databases.Exclude},
+		// An invalid glob here would be a hole, not a mismatch: path.Match's
+		// error is dropped at the call, and the function would go through.
+		{"tools.read.extraDenyFunctions", c.Tools.Read.ExtraDenyFunctions},
 	} {
 		for _, pat := range list.patterns {
 			if _, err := path.Match(pat, ""); err != nil {
