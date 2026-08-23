@@ -67,7 +67,7 @@ func (inv Inventory[C]) Find(a Address) (Cluster[C], error) {
 	return Cluster[C]{}, &Failure{
 		Kind:   KindBadArgument,
 		Detail: fmt.Sprintf("this server serves no cluster %s", a),
-		Hint:   "the environment and cluster arguments name one of the clusters this server was configured with",
+		Hint:   "every environment and cluster this server serves is listed in its instructions",
 	}
 }
 

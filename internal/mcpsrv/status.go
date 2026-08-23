@@ -33,9 +33,16 @@ func registerStatus[C any](r *Registry[C]) {
 
 	// register, not [Read]: the core's own tool answers about the whole server,
 	// and Read takes only arguments that name one cluster.
-	register(r, accessRead, statusAction, "report which config this server loaded and how it is running",
+	register(r, accessRead, statusAction, "report which config this server loaded, which clusters it serves and how it is running",
 		func(context.Context, C, struct{}) ([]block.Block, error) {
-			return []block.Block{status(r)}, nil
+			blocks := []block.Block{status(r)}
+			// A header with no rows under it is worse than no table: [Load]
+			// leaves no server without a cluster, but [Build] can be called
+			// with an inventory that was not assembled by it.
+			if len(r.rt.Inventory.Clusters) > 0 {
+				blocks = append(blocks, clusters(r.rt.Inventory))
+			}
+			return blocks, nil
 		})
 }
 
@@ -57,4 +64,17 @@ func status[C any](r *Registry[C]) block.KeyValues {
 		{Key: "maxBytes", Value: strconv.Itoa(set.Output.MaxBytes)},
 		{Key: "maxCellChars", Value: strconv.Itoa(set.Output.MaxCellChars)},
 	}
+}
+
+// clusters names the addresses the count above only totals: past a handful of
+// them this is the only place a human sees which ones exist and which refuse
+// writes, and it needs no connection to answer. The host stays out — the
+// answer lands in the context of a session that may never reach that cluster,
+// and the config path above leads whoever needs it to the file.
+func clusters[C any](inv Inventory[C]) block.Table {
+	rows := make([][]any, 0, len(inv.Clusters))
+	for _, c := range inv.Clusters {
+		rows = append(rows, []any{c.Address.Environment, c.Address.Cluster, c.ReadOnly})
+	}
+	return block.Table{Columns: []string{"environment", "cluster", "readOnly"}, Rows: rows, Total: len(rows)}
 }

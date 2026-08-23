@@ -109,5 +109,6 @@ anything, a pg_write_ tool always asks first. Where a tool call lands is an
 argument of that tool, not a property of this server: environment, cluster and
 database, all three required and none of them defaulted.
 
-pg_read_status reports which config file is loaded; when the server is not
-configured, every tool answers with the reason instead.`
+pg_read_status reports which config file is loaded and which clusters it
+serves; when the server is not configured, every tool answers with the reason
+instead.`

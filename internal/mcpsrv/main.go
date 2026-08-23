@@ -136,7 +136,7 @@ func NewRuntime[C any, P ConfigPtr[C]](inv Inventory[C], degraded error, proc Pr
 func Build[C any](spec Spec[C], rt Runtime[C]) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "infra-mcp-" + spec.Name, Version: buildinfo.Version()},
-		&mcp.ServerOptions{Instructions: spec.Source.Instructions(), Logger: rt.logger()},
+		&mcp.ServerOptions{Instructions: instructions(spec, rt), Logger: rt.logger()},
 	)
 	r := NewRegistry(server, spec.Source.Prefix(), rt)
 	spec.Source.Tools(r)
