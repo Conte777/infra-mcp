@@ -58,7 +58,7 @@ func TestLocationResolveKeepsAMissingNamedPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-			loc := Location{Source: "postgres", Profile: DefaultProfile}
+			loc := Location{Source: "postgres", Profile: "default"}
 			writeFile(t, loc.XDGPath(), "{}") // the trap: a readable file one candidate down
 			tt.named(t, &loc)
 
@@ -85,6 +85,8 @@ func TestLocationResolveOrder(t *testing.T) {
 
 	xdg := filepath.Join(dir, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", xdg)
+	// A variable exported in the shell running the tests would win outright.
+	t.Setenv(loc.EnvVar(), "")
 	writeFile(t, filepath.Join(xdg, "infra-mcp", "postgres.default.json"), "{}")
 
 	path, _, err := loc.Resolve()
@@ -114,6 +116,7 @@ func TestLocationResolveOrder(t *testing.T) {
 func TestLocationResolveNothingFound(t *testing.T) {
 	loc := Location{Source: "postgres", Profile: "default"}
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "empty"))
+	t.Setenv(loc.EnvVar(), "")
 
 	_, searched, err := loc.Resolve()
 	if err == nil {
@@ -310,15 +313,37 @@ func TestInitWritesWhereResolveWouldLook(t *testing.T) {
 }
 
 func TestLoadReportsMissingFileAsConfigError(t *testing.T) {
-	loc := Location{Source: "test", Profile: "default", Flag: filepath.Join(t.TempDir(), "absent.json")}
-
-	_, err := Load(loc, testConfig{}, nil)
-	var cerr *ConfigError
-	if !errors.As(err, &cerr) {
-		t.Fatalf("Load error = %v, want a *ConfigError", err)
+	tests := []struct {
+		name  string
+		named func(t *testing.T, loc *Location, path string)
+	}{
+		{"flag", func(_ *testing.T, loc *Location, path string) { loc.Flag = path }},
+		{"env", func(t *testing.T, loc *Location, path string) { t.Setenv(loc.EnvVar(), path) }},
 	}
-	if cerr.Hint != initHint {
-		t.Errorf("Hint = %q, want %q", cerr.Hint, initHint)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The XDG file is there and still must not be the one reported.
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			loc := Location{Source: "test", Profile: "default"}
+			writeFile(t, loc.XDGPath(), "{}")
+			absent := filepath.Join(t.TempDir(), "absent.json")
+			tt.named(t, &loc, absent)
+
+			_, err := Load(loc, testConfig{}, nil)
+			var cerr *ConfigError
+			if !errors.As(err, &cerr) {
+				t.Fatalf("Load error = %v, want a *ConfigError", err)
+			}
+			if cerr.Path != absent {
+				t.Errorf("Path = %q, want the named %q", cerr.Path, absent)
+			}
+			if len(cerr.Searched) != 1 || !strings.Contains(cerr.Searched[0], absent) {
+				t.Errorf("Searched = %v, want only the named path", cerr.Searched)
+			}
+			if cerr.Hint != initHint {
+				t.Errorf("Hint = %q, want %q", cerr.Hint, initHint)
+			}
+		})
 	}
 }
 
