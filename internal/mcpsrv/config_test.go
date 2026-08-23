@@ -37,9 +37,45 @@ func TestLocationResolvePrefersFlag(t *testing.T) {
 	if path != loc.Flag {
 		t.Errorf("path = %q, want %q", path, loc.Flag)
 	}
-	// A named file that does not exist must not fall through to the env or XDG one.
 	if len(searched) != 1 {
 		t.Errorf("searched = %v, want only the flag", searched)
+	}
+}
+
+// The rule itself, not the --config example of it: a path the operator named
+// is returned as named even when the file is absent, and --init writes to that
+// same path. Falling through would answer with another environment's database.
+func TestLocationResolveKeepsAMissingNamedPath(t *testing.T) {
+	const missing = "/nonexistent/nope.json"
+	tests := []struct {
+		name  string
+		named func(t *testing.T, loc *Location)
+		want  string
+	}{
+		{"flag", func(_ *testing.T, loc *Location) { loc.Flag = missing }, missing},
+		{"env", func(t *testing.T, loc *Location) { t.Setenv(loc.EnvVar(), missing) }, "INFRA_MCP_POSTGRES_CONFIG=" + missing},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			loc := Location{Source: "postgres", Profile: DefaultProfile}
+			writeFile(t, loc.XDGPath(), "{}") // the trap: a readable file one candidate down
+			tt.named(t, &loc)
+
+			path, searched, err := loc.Resolve()
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if path != missing {
+				t.Errorf("path = %q, want the named %q", path, missing)
+			}
+			if len(searched) != 1 || searched[0] != tt.want {
+				t.Errorf("searched = %v, want [%q]", searched, tt.want)
+			}
+			if got := loc.InitPath(); got != path {
+				t.Errorf("InitPath = %q, but Resolve reads %q", got, path)
+			}
+		})
 	}
 }
 

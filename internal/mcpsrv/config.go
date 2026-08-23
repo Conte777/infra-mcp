@@ -125,14 +125,25 @@ func (l Location) XDGPath() string {
 	return filepath.Join(dir, "infra-mcp", l.Source+"."+l.Profile+".json")
 }
 
+// namedPath is the path the operator named — by --config, else by the
+// environment variable — with the label an error shows it under; empty when
+// neither is set. [Location.Resolve] and [Location.InitPath] both go through
+// it, so --init cannot write where the server would not read.
+func (l Location) namedPath() (path, label string) {
+	if l.Flag != "" {
+		return l.Flag, l.Flag
+	}
+	if p := os.Getenv(l.EnvVar()); p != "" {
+		return p, l.EnvVar() + "=" + p
+	}
+	return "", ""
+}
+
 // InitPath is where --init writes, following the same order [Location.Resolve]
 // reads in. Writing the XDG file while the environment variable points
 // elsewhere would report success on a file the server never reads.
 func (l Location) InitPath() string {
-	if l.Flag != "" {
-		return l.Flag
-	}
-	if p := os.Getenv(l.EnvVar()); p != "" {
+	if p, _ := l.namedPath(); p != "" {
 		return p
 	}
 	return l.XDGPath()
@@ -141,17 +152,11 @@ func (l Location) InitPath() string {
 // Resolve returns the config path and every location looked at, in the order
 // --config > $INFRA_MCP_<SOURCE>_CONFIG > XDG. A path named explicitly is
 // returned even when it does not exist: silently falling through to the XDG
-// file would answer a question the operator did not ask.
+// file would answer a question the operator did not ask — and would seat the
+// server on another environment's database after a typo in the variable.
 func (l Location) Resolve() (path string, searched []string, err error) {
-	if l.Flag != "" {
-		return l.Flag, []string{l.Flag}, nil
-	}
-
-	if p := os.Getenv(l.EnvVar()); p != "" {
-		searched = append(searched, l.EnvVar()+"="+p)
-		if fileExists(p) {
-			return p, searched, nil
-		}
+	if p, label := l.namedPath(); p != "" {
+		return p, []string{label}, nil
 	}
 
 	p := l.XDGPath()
@@ -164,7 +169,7 @@ func (l Location) Resolve() (path string, searched []string, err error) {
 }
 
 func fileExists(p string) bool {
-	st, err := os.Stat(p) //nolint:gosec // the path is the operator's own --config, env or XDG choice
+	st, err := os.Stat(p)
 	return err == nil && !st.IsDir()
 }
 
@@ -227,7 +232,7 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (C
 		return fail("no config file found", err)
 	}
 	// Existence, not readability: an unreadable file is still one --init refuses
-	// to overwrite. Resolve returns a --config path whether or not it is there.
+	// to overwrite. Resolve returns a named path whether or not it is there.
 	haveFile = fileExists(path)
 
 	data, err := os.ReadFile(path) //nolint:gosec // the path is the operator's own --config, env or XDG choice
