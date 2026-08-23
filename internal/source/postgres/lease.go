@@ -211,7 +211,8 @@ func matches(patterns []string, name string) (string, bool) {
 	return "", false
 }
 
-// flatten takes "/" out of path.Match's way. A database name is not a path, and
+// flatten takes "/" out of path.Match's way, for database names here and for
+// function names in the deny list. A database name is not a path, and
 // a quoted identifier may hold a slash — but * and ? refuse to cross one, so
 // exclude: ["tmp_*"] would let "tmp_a/b" through, which is the wrong direction
 // for a filter to fail in. NUL is the one byte an identifier cannot hold, so

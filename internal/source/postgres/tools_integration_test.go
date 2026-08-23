@@ -578,6 +578,7 @@ func TestQueryRefusesEveryDenyListFamilyBeforeItReachesTheServer(t *testing.T) {
 		"session locks":       "SELECT pg_advisory_lock(42)",
 		"statistics":          "SELECT pg_stat_reset()",
 		"replication slots":   "SELECT pg_drop_replication_slot('s')",
+		"a wal message":       "SELECT pg_logical_emit_message(false, 'p', 'm')",
 		"wal":                 "SELECT pg_switch_wal()",
 		"the lease's timeout": "SELECT set_config('statement_timeout', '0', true)",
 	}

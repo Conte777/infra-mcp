@@ -31,7 +31,9 @@ var denyFunctions = []string{
 	"lo_import", "lo_export",
 	// dblink opens a libpq connection from the database host to any host:port,
 	// and the error text carries the answer back. The bare name needs its own
-	// entry: dblink_* does not match it.
+	// entry: dblink_* does not match it. The family is globbed whole although
+	// dblink_build_sql_* only builds a string: those builders exist to feed a
+	// call that is denied, so refusing them costs nothing that works.
 	"dblink", "dblink_*",
 	"pg_terminate_backend", "pg_cancel_backend",
 	"pg_reload_conf", "pg_rotate_logfile", "pg_promote",
@@ -40,9 +42,14 @@ var denyFunctions = []string{
 	"pg_advisory_lock", "pg_advisory_lock_shared",
 	"pg_try_advisory_lock", "pg_try_advisory_lock_shared",
 	// Statistics do not come back once reset, and reading a logical slot
-	// advances it, which breaks whoever replicates from it.
+	// advances it, which breaks whoever replicates from it. Neither family is
+	// globbed whole: pg_logical_slot_peek_* reads the same changes without
+	// advancing, and four pg_replication_origin_* members only report progress.
 	"pg_stat_reset*",
-	"pg_logical_slot_*", "pg_replication_origin_*",
+	"pg_logical_slot_get_*",
+	"pg_replication_origin_create", "pg_replication_origin_drop",
+	"pg_replication_origin_advance",
+	"pg_replication_origin_session_setup", "pg_replication_origin_session_reset",
 	"pg_drop_replication_slot", "pg_replication_slot_advance",
 	"pg_create_logical_replication_slot", "pg_create_physical_replication_slot",
 	"pg_copy_logical_replication_slot", "pg_copy_physical_replication_slot",
@@ -53,6 +60,12 @@ var denyFunctions = []string{
 	"pg_backup_start", "pg_backup_stop", "pg_start_backup", "pg_stop_backup",
 	"pg_wal_replay_pause", "pg_wal_replay_resume",
 	"pg_import_system_collations",
+	// pg_logical_emit_message is the one entry here that needs no superuser:
+	// EXECUTE is PUBLIC, and a non-transactional message is written to the WAL
+	// the moment it is called, so the rollback leaves it for every logical
+	// consumer to read. pg_log_* reach the server log the same way.
+	"pg_logical_emit_message", "pg_log_standby_snapshot",
+	"pg_log_backend_memory_contexts",
 	// set_config is how a read statement turns off the statement_timeout the
 	// lease just set on it.
 	"set_config",
@@ -74,11 +87,16 @@ func guardRead(cfg Config, sql string) error {
 	}
 	scan := scannable(sql)
 	if name, pattern := deniedCall(cfg, scan); name != "" {
+		detail := fmt.Sprintf("%s() has effects a read-only transaction does not undo, so it is on the deny list", name)
+		// The pattern is worth printing only when it is not the name again: it
+		// says why a call the list does not spell out is on it.
+		if pattern != name {
+			detail += fmt.Sprintf(" (%s)", pattern)
+		}
 		return &mcpsrv.Failure{
-			Kind: mcpsrv.KindDenied,
-			Detail: fmt.Sprintf("%s() has effects a read-only transaction does not undo, so it is on the deny list (%s)",
-				name, pattern),
-			Hint: "if this server should be allowed to call it, the deny list is not the place — that call is not a read",
+			Kind:   mcpsrv.KindDenied,
+			Detail: detail,
+			Hint:   "if this server should be allowed to call it, the deny list is not the place — that call is not a read",
 		}
 	}
 	// COPY cannot start a readable statement and cannot be nested in one, so the
@@ -176,10 +194,12 @@ func scannable(sql string) string {
 // hide behind a quote.
 func deniedCall(cfg Config, scan string) (name, pattern string) {
 	patterns := slices.Concat(denyFunctions, cfg.Tools.Read.ExtraDenyFunctions)
+	for i, pat := range patterns {
+		patterns[i] = flatten(strings.ToLower(strings.TrimSpace(pat)))
+	}
 	for _, call := range calledNames(scan) {
 		for _, pat := range patterns {
-			pat = strings.ToLower(strings.TrimSpace(pat))
-			if ok, _ := path.Match(flatten(pat), flatten(call)); ok {
+			if ok, _ := path.Match(pat, flatten(call)); ok {
 				return call, pat
 			}
 		}

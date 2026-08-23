@@ -131,8 +131,9 @@ func TestDenyListCoversTheClass(t *testing.T) {
 		{"replication slots and origins", []string{
 			"pg_logical_slot_get_changes('s', NULL, NULL)",
 			"pg_logical_slot_get_binary_changes('s', NULL, NULL)",
-			"pg_logical_slot_peek_changes('s', NULL, NULL)",
-			"pg_replication_origin_drop('o')", "pg_replication_origin_advance('o', '0/0')",
+			"pg_replication_origin_create('o')", "pg_replication_origin_drop('o')",
+			"pg_replication_origin_advance('o', '0/0')",
+			"pg_replication_origin_session_setup('o')", "pg_replication_origin_session_reset()",
 			"pg_drop_replication_slot('s')", "pg_replication_slot_advance('s', '0/0')",
 			"pg_create_logical_replication_slot('s', 'pgoutput')",
 			"pg_create_physical_replication_slot('s')",
@@ -145,6 +146,10 @@ func TestDenyListCoversTheClass(t *testing.T) {
 			"pg_backup_start('l')", "pg_backup_stop()",
 			"pg_start_backup('l')", "pg_stop_backup()",
 			"pg_wal_replay_pause()", "pg_wal_replay_resume()",
+		}},
+		{"a wal message needs no superuser", []string{
+			"pg_logical_emit_message(false, 'p', 'm')", "pg_log_standby_snapshot()",
+			"pg_log_backend_memory_contexts(1)",
 		}},
 		{"the rest", []string{"pg_import_system_collations('pg_catalog')", "set_config('statement_timeout', '0', true)"}},
 	}
@@ -164,6 +169,10 @@ func TestDenyListCoversTheClass(t *testing.T) {
 				if !strings.Contains(f.Detail, name) {
 					t.Errorf("detail = %q, want it to name %s", f.Detail, name)
 				}
+				// An exact entry would otherwise print the name twice.
+				if strings.Contains(f.Detail, "("+name+")") {
+					t.Errorf("detail = %q, want the pattern left out when it is the name", f.Detail)
+				}
 			}
 		})
 	}
@@ -181,6 +190,17 @@ func TestDenyGlobsDoNotOverreach(t *testing.T) {
 		"SELECT pg_stat_get_replication_slot('s')",
 		"SELECT pg_current_logfile()",
 		"SELECT pg_relation_filepath('t')",
+		// Peeking reads the same changes without advancing the slot, and these
+		// four origin functions only report where replication got to — the
+		// diagnostic queries the deny list exists to leave alone.
+		"SELECT pg_logical_slot_peek_changes('s', NULL, NULL)",
+		"SELECT pg_logical_slot_peek_binary_changes('s', NULL, NULL)",
+		"SELECT pg_replication_origin_oid('o')",
+		"SELECT pg_replication_origin_progress('o', true)",
+		"SELECT pg_replication_origin_session_progress(true)",
+		"SELECT pg_replication_origin_session_is_setup()",
+		"SELECT pg_replication_origin_xact_setup('0/0', now())",
+		"SELECT pg_replication_origin_xact_reset()",
 	}
 	for _, sql := range allowed {
 		if err := guardRead(Defaults(), sql); err != nil {
