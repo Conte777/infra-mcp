@@ -33,10 +33,36 @@ infra-mcp-postgres --print-config-schema   # every key this build accepts
 
 That lands in `$XDG_CONFIG_HOME/infra-mcp/postgres.json` (`~/.config/...` by
 default); `INFRA_MCP_POSTGRES_CONFIG` points elsewhere. One file holds every
-environment and every cluster in it: fill in the cluster `--init` wrote, and
-give the password as `${VAR}` — a literal password in the file is a validation
-error. The config is read once at startup, so restart the session after editing
-it.
+environment and every cluster, and one server reaches all of them — a tool call
+names the environment, the cluster and the database:
+
+```json
+{
+  "connection": { "user": "app", "password": "${PGPASSWORD}" },
+  "environments": {
+    "dev": {
+      "connection": { "host": "dev.example.com" },
+      "clusters": { "main": { "databases": { "default": "app_db" } } }
+    },
+    "prod": {
+      "readOnly": true,
+      "clusters": {
+        "main": {
+          "connection": { "host": "prod.example.com" },
+          "databases": { "default": "app_db", "exclude": ["*_tmp"] }
+        }
+      }
+    }
+  }
+}
+```
+
+Settings written above a cluster are inherited by every cluster below, and a
+cluster overrides what it names — the user and password above are shared, the
+host is per environment. `"readOnly": true` on an environment or a cluster
+refuses every write tool at that address. Give the password as `${VAR}` — a
+literal password in the file is a validation error. The config is read once at
+startup, so restart the session after editing it.
 
 ### Approving the read tools once
 
@@ -51,11 +77,6 @@ call. One line in `~/.claude/settings.json` — or in a project
 Leave the write tool out. With no rule of its own it asks every time, which is
 the point of it; and an `ask` rule broad enough to cover the server would win
 over the `allow` above and take the read tools down with it.
-
-### A second environment
-
-Another entry under `environments` in the same file, and the one server reaches
-it: a tool call names the environment, the cluster and the database.
 
 ### Updating
 
