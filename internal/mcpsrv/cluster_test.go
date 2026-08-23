@@ -104,4 +104,10 @@ func TestUnknownAddressIsABadArgument(t *testing.T) {
 	if !strings.Contains(f.Detail, "dev/nope") {
 		t.Errorf("Detail = %q, want the address that was asked for", f.Detail)
 	}
+	// The addresses stay out of the refusal: the instructions of the same
+	// session already list them, and a refusal that repeats them would put
+	// prod cluster names in front of a session that never reached prod.
+	if strings.Contains(f.Detail+f.Hint, testAddress.Cluster) {
+		t.Errorf("refusal = %q / %q, want it to name no cluster of its own", f.Detail, f.Hint)
+	}
 }
