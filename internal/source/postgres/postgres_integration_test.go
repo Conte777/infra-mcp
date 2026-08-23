@@ -21,6 +21,10 @@ import (
 // creates; the eviction test needs a second database to walk into.
 const otherDatabase = "postgres"
 
+// callArgs is the address the harness's one cluster answers at; only the
+// database argument varies between the calls below.
+var callArgs = Args{Address: testCluster}
+
 func testSource(t *testing.T, tune func(*Config)) (*Source, Config) {
 	t.Helper()
 
@@ -43,7 +47,7 @@ func testSource(t *testing.T, tune func(*Config)) (*Source, Config) {
 		tune(&cfg)
 	}
 
-	s := &Source{pools: newPools(cfg, slog.New(slog.DiscardHandler))}
+	s := &Source{pools: newPools(slog.New(slog.DiscardHandler))}
 	t.Cleanup(func() {
 		if err := s.Close(); err != nil {
 			t.Errorf("close: %v", err)
@@ -100,7 +104,7 @@ func TestReadOnlyTransactionStopsAWriteInsideACTE(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE t (id int); INSERT INTO t VALUES (1), (2)`)
 
-	_, err := runRead(t, s, cfg, ConnectionArgs{},
+	_, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			var n int
 			err := tx.QueryRow(ctx, `WITH gone AS (DELETE FROM t RETURNING id) SELECT count(*) FROM gone`).Scan(&n)
@@ -110,7 +114,7 @@ func TestReadOnlyTransactionStopsAWriteInsideACTE(t *testing.T) {
 	wantKind(t, err, mcpsrv.KindDenied)
 
 	var left int
-	if _, err := runRead(t, s, cfg, ConnectionArgs{},
+	if _, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			return nil, tx.QueryRow(ctx, `SELECT count(*) FROM t`).Scan(&left)
 		}); err != nil {
@@ -129,7 +133,7 @@ func TestStatementTimeoutFiresOnTheServer(t *testing.T) {
 	})
 
 	start := time.Now()
-	_, err := runRead(t, s, cfg, ConnectionArgs{},
+	_, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			_, err := tx.Exec(ctx, `SELECT pg_sleep(5)`)
 			return nil, err
@@ -163,7 +167,7 @@ func TestLockTimeoutFiresOnTheServer(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err = runRead(t, s, cfg, ConnectionArgs{},
+	_, err = runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			return nil, tx.QueryRow(ctx, `SELECT count(*) FROM locked`).Scan(new(int))
 		})
@@ -178,7 +182,7 @@ func TestWriteCommits(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE w (id int)`)
 
-	if _, err := runWrite(t, s, cfg, ConnectionArgs{},
+	if _, err := runWrite(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			_, err := tx.Exec(ctx, `INSERT INTO w VALUES (1)`)
 			return nil, err
@@ -187,7 +191,7 @@ func TestWriteCommits(t *testing.T) {
 	}
 
 	var rows int
-	if _, err := runRead(t, s, cfg, ConnectionArgs{},
+	if _, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			return nil, tx.QueryRow(ctx, `SELECT count(*) FROM w`).Scan(&rows)
 		}); err != nil {
@@ -205,7 +209,7 @@ func TestWriteRollsBackOnFailure(t *testing.T) {
 	exec(t, cfg, cfg.Databases.Default, `CREATE TABLE w (id int)`)
 
 	wantErr := errors.New("the tool gave up")
-	_, err := runWrite(t, s, cfg, ConnectionArgs{},
+	_, err := runWrite(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			if _, err := tx.Exec(ctx, `INSERT INTO w VALUES (1)`); err != nil {
 				return nil, err
@@ -217,7 +221,7 @@ func TestWriteRollsBackOnFailure(t *testing.T) {
 	}
 
 	var rows int
-	if _, err := runRead(t, s, cfg, ConnectionArgs{},
+	if _, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			return nil, tx.QueryRow(ctx, `SELECT count(*) FROM w`).Scan(&rows)
 		}); err != nil {
@@ -237,7 +241,7 @@ func TestPoolsOpenOnFirstCall(t *testing.T) {
 		t.Fatalf("%d pools before the first call, want none", open)
 	}
 	for range 2 {
-		if _, err := runRead(t, s, cfg, ConnectionArgs{},
+		if _, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 			func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 				return nil, tx.QueryRow(ctx, `SELECT 1`).Scan(new(int))
 			}); err != nil {
@@ -256,13 +260,13 @@ func TestEvictionLeavesARunningQueryAlone(t *testing.T) {
 	s, cfg := testSource(t, func(c *Config) { c.Pool.MaxDatabases = 1; c.Databases.ShowAll = true })
 
 	evicted := make(chan struct{})
-	_, err := runRead(t, s, cfg, ConnectionArgs{},
+	_, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			// Background on purpose: this is the concurrent call whose pool
 			// eviction the running one must survive.
 			go func() { //nolint:contextcheck // a second, independent call
 				defer close(evicted)
-				if _, err := runRead(t, s, cfg, Args{Database: otherDatabase},
+				if _, err := runRead(t, s, cfg, Args{Address: testCluster, Database: otherDatabase},
 					func(ctx context.Context, tx pgx.Tx, _ Config, _ Args) ([]block.Block, error) {
 						return nil, tx.QueryRow(ctx, `SELECT 1`).Scan(new(int))
 					}); err != nil {
@@ -282,7 +286,7 @@ func TestEvictionLeavesARunningQueryAlone(t *testing.T) {
 func TestUnknownDatabaseIsABadArgument(t *testing.T) {
 	s, cfg := testSource(t, func(c *Config) { c.Databases.ShowAll = true })
 
-	_, err := runRead(t, s, cfg, Args{Database: "no_such_database"},
+	_, err := runRead(t, s, cfg, Args{Address: testCluster, Database: "no_such_database"},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ Args) ([]block.Block, error) {
 			return nil, tx.QueryRow(ctx, `SELECT 1`).Scan(new(int))
 		})
@@ -295,7 +299,7 @@ func TestUnknownDatabaseIsABadArgument(t *testing.T) {
 func TestBadPasswordIsDenied(t *testing.T) {
 	s, cfg := testSource(t, func(c *Config) { c.Connection.Password = "not-the-password" })
 
-	_, err := runRead(t, s, cfg, ConnectionArgs{},
+	_, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			return nil, tx.QueryRow(ctx, `SELECT 1`).Scan(new(int))
 		})
@@ -309,7 +313,7 @@ func TestUnreachableServerIsUnavailable(t *testing.T) {
 		c.Timeouts.Connect = mcpsrv.Duration(time.Second)
 	})
 
-	_, err := runRead(t, s, cfg, ConnectionArgs{},
+	_, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster},
 		func(ctx context.Context, tx pgx.Tx, _ Config, _ ConnectionArgs) ([]block.Block, error) {
 			return nil, tx.QueryRow(ctx, `SELECT 1`).Scan(new(int))
 		})

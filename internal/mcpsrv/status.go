@@ -8,11 +8,11 @@ import (
 	"github.com/Conte777/infra-mcp/internal/mcpsrv/block"
 )
 
-// Env is what the core can say about itself: which config it settled on, and
-// how it is being spoken to.
-type Env struct {
+// Process is what the core can say about itself: which config it settled on,
+// and how it is being spoken to. Not "environment": that word now names a
+// group of clusters in the config.
+type Process struct {
 	Source     string
-	Profile    string
 	ConfigPath string // empty when no config file was found
 	Transport  string // "stdio", or "http <addr>"
 }
@@ -31,23 +31,25 @@ func registerStatus[C any](r *Registry[C]) {
 		}
 	}
 
-	Read(r, statusAction, "report which config this server loaded and how it is running",
+	// register, not [Read]: the core's own tool answers about the whole server,
+	// and Read takes only arguments that name one cluster.
+	register(r, accessRead, statusAction, "report which config this server loaded and how it is running",
 		func(context.Context, C, struct{}) ([]block.Block, error) {
 			return []block.Block{status(r)}, nil
 		})
 }
 
 func status[C any](r *Registry[C]) block.KeyValues {
-	env, set := r.rt.Env, r.rt.Settings
-	path := env.ConfigPath
+	proc, set := r.rt.Process, r.rt.Settings
+	path := proc.ConfigPath
 	if path == "" {
 		path = "(none found)"
 	}
 	return block.KeyValues{
-		{Key: "source", Value: env.Source},
-		{Key: "profile", Value: env.Profile},
+		{Key: "source", Value: proc.Source},
 		{Key: "config", Value: path},
-		{Key: "transport", Value: env.Transport},
+		{Key: "clusters", Value: strconv.Itoa(len(r.rt.Inventory.Clusters))},
+		{Key: "transport", Value: proc.Transport},
 		{Key: "version", Value: buildinfo.Version()},
 		{Key: "tools", Value: strconv.Itoa(len(r.tools))},
 		{Key: "writeConfirmation", Value: strconv.FormatBool(set.Write.RequireConfirmation)},

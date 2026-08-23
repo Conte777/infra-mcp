@@ -16,18 +16,30 @@ type testReadTools struct {
 }
 
 type testConnection struct {
-	Host     string `json:"host"`
-	Password string `json:"password" mcpsrv:"secret"`
+	Host     string `json:"host,omitzero"`
+	Password string `json:"password,omitzero" mcpsrv:"secret"`
+}
+
+// testCluster is a source's cluster type: the core's half embedded, and one
+// group of the source's own.
+type testCluster struct {
+	ClusterCommon
+
+	Connection testConnection `json:"connection,omitzero"`
 }
 
 type testConfig struct {
-	Common[testReadTools]
+	Common[testCluster, testReadTools]
+	testCluster
+}
 
-	Connection testConnection `json:"connection"`
+// testEnvironments is the shortest config that declares a cluster.
+func testEnvironments(cluster string) string {
+	return `"environments":{"dev":{"clusters":{"main":` + cluster + `}}}`
 }
 
 func TestLocationResolvePrefersFlag(t *testing.T) {
-	loc := Location{Source: "postgres", Profile: "default", Flag: "/given/by/flag.json"}
+	loc := Location{Source: "postgres", Flag: "/given/by/flag.json"}
 	t.Setenv(loc.EnvVar(), "/from/env.json")
 
 	path, searched, err := loc.Resolve()
@@ -58,7 +70,7 @@ func TestLocationResolveKeepsAMissingNamedPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-			loc := Location{Source: "postgres", Profile: "default"}
+			loc := Location{Source: "postgres"}
 			writeFile(t, loc.XDGPath(), "{}") // the trap: a readable file one candidate down
 			tt.named(t, &loc)
 
@@ -81,13 +93,13 @@ func TestLocationResolveKeepsAMissingNamedPath(t *testing.T) {
 
 func TestLocationResolveOrder(t *testing.T) {
 	dir := t.TempDir()
-	loc := Location{Source: "postgres", Profile: "default"}
+	loc := Location{Source: "postgres"}
 
 	xdg := filepath.Join(dir, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	// A variable exported in the shell running the tests would win outright.
 	t.Setenv(loc.EnvVar(), "")
-	writeFile(t, filepath.Join(xdg, "infra-mcp", "postgres.default.json"), "{}")
+	writeFile(t, filepath.Join(xdg, "infra-mcp", "postgres.json"), "{}")
 
 	path, _, err := loc.Resolve()
 	if err != nil {
@@ -114,7 +126,7 @@ func TestLocationResolveOrder(t *testing.T) {
 }
 
 func TestLocationResolveNothingFound(t *testing.T) {
-	loc := Location{Source: "postgres", Profile: "default"}
+	loc := Location{Source: "postgres"}
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "empty"))
 	t.Setenv(loc.EnvVar(), "")
 
@@ -263,9 +275,11 @@ func TestDurationRoundTrip(t *testing.T) {
 
 func TestInitWritesMinimalAndRefusesOverwrite(t *testing.T) {
 	dir := t.TempDir()
-	loc := Location{Source: "test", Profile: "default", Flag: filepath.Join(dir, "test.default.json")}
+	loc := Location{Source: "test", Flag: filepath.Join(dir, "test.json")}
 
-	minimal := testConfig{Connection: testConnection{Host: "db.example.com", Password: "${PGPASSWORD}"}}
+	minimal := testConfig{testCluster: testCluster{
+		Connection: testConnection{Host: "db.example.com", Password: "${PGPASSWORD}"},
+	}}
 	path, err := Init(loc, minimal, "https://example.com/schema.json")
 	if err != nil {
 		t.Fatalf("Init: %v", err)
@@ -298,7 +312,7 @@ func TestInitWritesMinimalAndRefusesOverwrite(t *testing.T) {
 // would report success on a file the server never reads.
 func TestInitWritesWhereResolveWouldLook(t *testing.T) {
 	dir := t.TempDir()
-	loc := Location{Source: "test", Profile: "default"}
+	loc := Location{Source: "test"}
 	want := filepath.Join(dir, "from-env.json")
 	t.Setenv(loc.EnvVar(), want)
 
@@ -324,7 +338,7 @@ func TestLoadReportsMissingFileAsConfigError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// The XDG file is there and still must not be the one reported.
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-			loc := Location{Source: "test", Profile: "default"}
+			loc := Location{Source: "test"}
 			writeFile(t, loc.XDGPath(), "{}")
 			absent := filepath.Join(t.TempDir(), "absent.json")
 			tt.named(t, &loc, absent)
@@ -349,9 +363,9 @@ func TestLoadReportsMissingFileAsConfigError(t *testing.T) {
 
 // --init refuses to overwrite, so sending the operator there would strand them.
 func TestLoadHintsAtTheSchemaWhenTheFileExists(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "test.default.json")
-	writeFile(t, path, `{"connection":{"host":"h","password":"${P}"},"nope":1}`)
-	loc := Location{Source: "test", Profile: "default", Flag: path}
+	path := filepath.Join(t.TempDir(), "test.json")
+	writeFile(t, path, `{`+testEnvironments(`{"host":"h"}`)+`,"nope":1}`)
+	loc := Location{Source: "test", Flag: path}
 
 	_, err := Load(loc, testConfig{}, nil)
 	var cerr *ConfigError
@@ -369,12 +383,12 @@ func TestLoadHintsAtTheSchemaWhenTheFileCannotBeRead(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a 0000 file")
 	}
-	path := filepath.Join(t.TempDir(), "test.default.json")
+	path := filepath.Join(t.TempDir(), "test.json")
 	writeFile(t, path, `{}`)
 	if err := os.Chmod(path, 0o000); err != nil {
 		t.Fatal(err)
 	}
-	loc := Location{Source: "test", Profile: "default", Flag: path}
+	loc := Location{Source: "test", Flag: path}
 
 	_, err := Load(loc, testConfig{}, nil)
 	var cerr *ConfigError

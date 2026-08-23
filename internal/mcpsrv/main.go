@@ -68,7 +68,7 @@ func Main[C any, P ConfigPtr[C]](spec Spec[C]) int {
 		return exitOK
 	}
 
-	loc := Location{Source: spec.Name, Profile: opts.profile, Flag: opts.configPath}
+	loc := Location{Source: spec.Name, Flag: opts.configPath}
 
 	if opts.initConfig {
 		path, err := Init[C, P](loc, spec.Minimal, SchemaURL(spec.Name))
@@ -86,7 +86,6 @@ func Main[C any, P ConfigPtr[C]](spec Spec[C]) int {
 
 type options struct {
 	configPath  string
-	profile     string
 	httpAddr    string
 	logLevel    slog.Level
 	initConfig  bool
@@ -101,8 +100,6 @@ func parseFlags(source string, args []string) (options, error) {
 	fs := flag.NewFlagSet("infra-mcp-"+source, flag.ContinueOnError)
 	fs.StringVar(&opts.configPath, "config", "",
 		"config file to read; wins over "+Location{Source: source}.EnvVar()+" and the XDG default")
-	fs.StringVar(&opts.profile, "profile", DefaultProfile,
-		"profile: the config read is <source>.<profile>.json")
 	fs.StringVar(&opts.httpAddr, "http", "",
 		"serve streamable HTTP on this address instead of stdio; unauthenticated, so bind it to a loopback address")
 	fs.StringVar(&level, "log-level", level, "debug, info, warn or error")
@@ -120,15 +117,17 @@ func parseFlags(source string, args []string) (options, error) {
 	return opts, nil
 }
 
-// NewRuntime prepares the runtime for cfg. Settings are read off cfg even on a
-// degraded start, where cfg is the source's defaults.
-func NewRuntime[C any, P ConfigPtr[C]](cfg C, degraded error, env Env, log *slog.Logger) Runtime[C] {
+// NewRuntime prepares the runtime for inv. Settings are read off the global
+// level even on a degraded start, where that level is the source's defaults:
+// they belong to the server, not to a cluster.
+func NewRuntime[C any, P ConfigPtr[C]](inv Inventory[C], degraded error, proc Process, log *slog.Logger) Runtime[C] {
+	global := inv.Global
 	return Runtime[C]{
-		Config:   cfg,
-		Settings: P(&cfg).Settings(),
-		Degraded: degraded,
-		Env:      env,
-		Logger:   log,
+		Inventory: inv,
+		Settings:  P(&global).Settings(),
+		Degraded:  degraded,
+		Process:   proc,
+		Logger:    log,
 	}
 }
 
@@ -151,23 +150,23 @@ func serve[C any, P ConfigPtr[C]](spec Spec[C], loc Location, opts options, log 
 		transport = "http " + opts.httpAddr
 	}
 
-	cfg := spec.Defaults
+	inv := Inventory[C]{Global: spec.Defaults}
 	var degraded error
 	if loaded, err := Load[C, P](loc, spec.Defaults, spec.Types); err != nil {
 		degraded = err
 	} else {
-		cfg = loaded
+		inv = loaded
 	}
 
 	// Resolve again only to name the file in the log and in status; an error
 	// here is the same one Load already turned into a degraded start.
 	path, _, _ := loc.Resolve()
 
-	env := Env{Source: spec.Name, Profile: opts.profile, ConfigPath: path, Transport: transport}
-	server := Build(spec, NewRuntime[C, P](cfg, degraded, env, log))
+	proc := Process{Source: spec.Name, ConfigPath: path, Transport: transport}
+	server := Build(spec, NewRuntime[C, P](inv, degraded, proc, log))
 
 	log.Info("starting",
-		"source", spec.Name, "profile", opts.profile, "config", path,
+		"source", spec.Name, "config", path, "clusters", len(inv.Clusters),
 		"transport", transport, "version", buildinfo.Version())
 	if degraded != nil {
 		log.Warn("degraded start: every tool call answers with this", "reason", degraded)

@@ -14,8 +14,8 @@ func listTools(t *testing.T) []*mcp.Tool {
 	t.Helper()
 
 	spec := postgres.Spec()
-	rt := mcpsrv.NewRuntime(spec.Defaults, nil,
-		mcpsrv.Env{Source: spec.Name, Profile: mcpsrv.DefaultProfile, Transport: "stdio"}, nil)
+	rt := mcpsrv.NewRuntime(mcpsrv.Inventory[postgres.Config]{Global: spec.Defaults}, nil,
+		mcpsrv.Process{Source: spec.Name, Transport: "stdio"}, nil)
 
 	ct, st := mcp.NewInMemoryTransports()
 	if _, err := mcpsrv.Build(spec, rt).Connect(t.Context(), st, nil); err != nil {
@@ -57,18 +57,19 @@ func TestToolSet(t *testing.T) {
 	}
 }
 
-// The database argument is required everywhere it means anything, which is what
-// keeps "which database" out of the server's state (ADR-0001). It is also the
-// one field that arrives by embedding, so this is the check that the embedded
-// struct is inlined into the schema rather than nested under a key.
+// Every argument that says where a call lands is required and none is
+// defaulted, which is what keeps "which cluster" and "which database" out of
+// the server's state (ADR-0001). They also all arrive by embedding, so this is
+// the check that the embedded structs are inlined into the schema rather than
+// nested under a key.
 func TestRequiredArguments(t *testing.T) {
 	want := map[string][]string{
-		"pg_read_list_databases": nil,
-		"pg_read_list_tables":    {"database"},
-		"pg_read_describe_table": {"database", "tables"},
-		"pg_read_query":          {"database", "sql"},
-		"pg_read_explain":        {"database", "sql"},
-		"pg_write_execute":       {"database", "sql"},
+		"pg_read_list_databases": {"cluster", "environment"},
+		"pg_read_list_tables":    {"cluster", "database", "environment"},
+		"pg_read_describe_table": {"cluster", "database", "environment", "tables"},
+		"pg_read_query":          {"cluster", "database", "environment", "sql"},
+		"pg_read_explain":        {"cluster", "database", "environment", "sql"},
+		"pg_write_execute":       {"cluster", "database", "environment", "sql"},
 		"pg_read_status":         nil,
 	}
 

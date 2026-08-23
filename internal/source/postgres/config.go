@@ -16,13 +16,24 @@ import (
 // and the binary suffix all derive from it.
 const Name = "postgres"
 
-// Config is the whole postgres server config. The groups the core reads —
-// $schema, output, tools.write — come from the embedded skeleton.
+// Config is the whole postgres server config, and — once the core has applied
+// inheritance — the config in effect at one address. The groups the core reads
+// come from the embedded skeleton; the embedded [Cluster] is the global level,
+// what a cluster inherits unless it says otherwise.
 type Config struct {
-	mcpsrv.Common[ReadTools]
+	mcpsrv.Common[Cluster, ReadTools]
+	Cluster
+}
 
-	Connection Connection `json:"connection" jsonschema:"how to reach the postgres server"`
-	Databases  Databases  `json:"databases" jsonschema:"which databases the tools may touch"`
+// Cluster is one postgres server: everything that may differ between clusters,
+// and so everything that inherits down the three levels of the file. Every key
+// is optional at every level — what a cluster ends up needing is [Config.Validate]'s
+// business, once inheritance has had its say.
+type Cluster struct {
+	mcpsrv.ClusterCommon
+
+	Connection Connection `json:"connection,omitzero" jsonschema:"how to reach the postgres server"`
+	Databases  Databases  `json:"databases,omitzero" jsonschema:"which databases the tools may touch"`
 	Pool       Pool       `json:"pool,omitzero" jsonschema:"connection pooling"`
 	Timeouts   Timeouts   `json:"timeouts,omitzero" jsonschema:"query and connection deadlines"`
 }
@@ -32,10 +43,10 @@ type Config struct {
 // "the password must be a ${VAR}" is a check on one field instead of a parse of
 // a URL.
 type Connection struct {
-	Host     string  `json:"host" jsonschema:"postgres host"`
+	Host     string  `json:"host,omitzero" jsonschema:"postgres host"`
 	Port     int     `json:"port,omitzero" jsonschema:"postgres port"`
-	User     string  `json:"user" jsonschema:"role to connect as"`
-	Password string  `json:"password" jsonschema:"password as ${VAR}, naming an environment variable" mcpsrv:"secret"`
+	User     string  `json:"user,omitzero" jsonschema:"role to connect as"`
+	Password string  `json:"password,omitzero" jsonschema:"password as ${VAR}, naming an environment variable" mcpsrv:"secret"`
 	SSLMode  SSLMode `json:"sslmode,omitzero" jsonschema:"libpq sslmode"`
 }
 
@@ -55,7 +66,7 @@ const (
 // Databases bounds what the tools can reach. With showAll off, default is the
 // only database they see.
 type Databases struct {
-	Default string   `json:"default" jsonschema:"database to connect to, and the only one reachable unless showAll is set"`
+	Default string   `json:"default,omitzero" jsonschema:"database to connect to, and the only one reachable unless showAll is set"`
 	ShowAll bool     `json:"showAll,omitzero" jsonschema:"allow tools into every database of the cluster"`
 	Exclude []string `json:"exclude,omitzero" jsonschema:"glob patterns of databases to hide when showAll is set"`
 }
@@ -84,19 +95,23 @@ type ReadTools struct {
 	ExtraDenyFunctions []string `json:"extraDenyFunctions,omitzero" jsonschema:"function names to add to the built-in deny list"`
 }
 
-// Defaults is the config a file is applied on top of.
+// Defaults is the config each level of a file is applied on top of. Cluster
+// keys are in it too: a cluster that names none of them still needs a pool and
+// a set of timeouts.
 func Defaults() Config {
 	c := Config{
-		Connection: Connection{Port: 5432, SSLMode: SSLPrefer},
-		Pool: Pool{
-			MaxDatabases:        4,
-			MaxConnsPerDatabase: 2,
-			IdleTimeout:         mcpsrv.Duration(5 * time.Minute),
-		},
-		Timeouts: Timeouts{
-			Query:   mcpsrv.Duration(30 * time.Second),
-			Lock:    mcpsrv.Duration(5 * time.Second),
-			Connect: mcpsrv.Duration(5 * time.Second),
+		Cluster: Cluster{
+			Connection: Connection{Port: 5432, SSLMode: SSLPrefer},
+			Pool: Pool{
+				MaxDatabases:        4,
+				MaxConnsPerDatabase: 2,
+				IdleTimeout:         mcpsrv.Duration(5 * time.Minute),
+			},
+			Timeouts: Timeouts{
+				Query:   mcpsrv.Duration(30 * time.Second),
+				Lock:    mcpsrv.Duration(5 * time.Second),
+				Connect: mcpsrv.Duration(5 * time.Second),
+			},
 		},
 	}
 	c.Output = mcpsrv.Output{MaxRows: 200, MaxBytes: 32768, MaxCellChars: 200}
@@ -104,13 +119,19 @@ func Defaults() Config {
 	return c
 }
 
-// Minimal is what --init writes: the four required keys with placeholders, and
-// nothing else.
+// Minimal is what --init writes: one environment holding one cluster, with the
+// keys that have no default filled in as placeholders, and nothing else.
 func Minimal() Config {
-	return Config{
-		Connection: Connection{Host: "db.example.com", User: "app", Password: "${PGPASSWORD}"},
-		Databases:  Databases{Default: "app_db"},
+	var c Config
+	c.Environments = map[string]mcpsrv.Environment[Cluster]{
+		"dev": {Clusters: map[string]Cluster{
+			"main": {
+				Connection: Connection{Host: "db.example.com", User: "app", Password: "${PGPASSWORD}"},
+				Databases:  Databases{Default: "app_db"},
+			},
+		}},
 	}
+	return c
 }
 
 // ConfigTypes carries the constraints the jsonschema tag cannot express.
@@ -126,8 +147,20 @@ func ConfigTypes() mcpsrv.TypeSchemas {
 	}
 }
 
-// Validate covers what the schema cannot state.
+// Validate covers what the schema cannot state, and runs on one cluster's
+// config. Presence is part of that now: a key may arrive from any of the three
+// levels, so the schema can require it at none of them.
 func (c *Config) Validate() error {
+	for _, f := range []struct{ key, value string }{
+		{"connection.host", c.Connection.Host},
+		{"connection.user", c.Connection.User},
+		{"connection.password", c.Connection.Password},
+		{"databases.default", c.Databases.Default},
+	} {
+		if f.value == "" {
+			return fmt.Errorf("%s: no value at this address, and none inherited", f.key)
+		}
+	}
 	// An explicit zero in the file overrides the default, and a pool sized zero
 	// would be quietly rounded up to something that works — a key that does
 	// nothing is worse than a config that is refused.

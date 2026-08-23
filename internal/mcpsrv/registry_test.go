@@ -12,6 +12,8 @@ import (
 )
 
 type testIn struct {
+	Address
+
 	Name string `json:"name" jsonschema:"who to greet"`
 }
 
@@ -91,7 +93,7 @@ func TestDegradedStartAnswersWithoutReachingTheHandler(t *testing.T) {
 	}
 	r := newTestRegistry(t, Runtime[testConfig]{Degraded: errors.New("no config: none found")})
 
-	_, err := call(t.Context(), r, h, testIn{})
+	_, err := call(t.Context(), r, accessRead, h, testIn{})
 
 	if reached {
 		t.Fatal("the handler ran on a degraded start")
@@ -105,20 +107,29 @@ func TestDegradedStartAnswersWithoutReachingTheHandler(t *testing.T) {
 	}
 }
 
-func TestHandlerReceivesTheLoadedConfig(t *testing.T) {
+// The config a handler gets is one cluster's, and the global keys ride along in
+// it: a source reads its own global half — tools.read — off the same value.
+func TestHandlerReceivesTheConfigOfTheAddressedCluster(t *testing.T) {
 	var got testConfig
 	h := func(_ context.Context, cfg testConfig, _ testIn) ([]block.Block, error) {
 		got = cfg
 		return nil, nil
 	}
-	cfg := testConfig{Connection: testConnection{Host: "db.example.com"}}
-	r := newTestRegistry(t, Runtime[testConfig]{Config: cfg})
+	cfg := testConfig{testCluster: testCluster{Connection: testConnection{Host: "db.example.com"}}}
+	cfg.Tools.Read = testReadTools{Extra: []string{"one"}}
+	addr := Address{Environment: "dev", Cluster: "main"}
+	r := newTestRegistry(t, Runtime[testConfig]{Inventory: Inventory[testConfig]{
+		Clusters: []Cluster[testConfig]{{Address: addr, Config: cfg}},
+	}})
 
-	if _, err := call(t.Context(), r, h, testIn{}); err != nil {
+	if _, err := call(t.Context(), r, accessRead, h, testIn{Address: addr}); err != nil {
 		t.Fatalf("call() = %v", err)
 	}
 	if got.Connection.Host != cfg.Connection.Host {
 		t.Fatalf("handler saw %+v, want the loaded config", got)
+	}
+	if len(got.Tools.Read.Extra) != 1 {
+		t.Errorf("handler saw tools.read = %+v, want the global half of the config", got.Tools.Read)
 	}
 }
 

@@ -4,7 +4,9 @@ package srvtest
 
 import (
 	"errors"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,9 +23,10 @@ const degradedReason = "conformance run: no config"
 func Conformance[C any, P mcpsrv.ConfigPtr[C]](t *testing.T, spec mcpsrv.Spec[C]) {
 	t.Helper()
 
-	env := mcpsrv.Env{Source: spec.Name, Profile: mcpsrv.DefaultProfile, Transport: "stdio"}
-	rt := mcpsrv.NewRuntime[C, P](spec.Defaults, nil, env, nil)
-	degradedRT := mcpsrv.NewRuntime[C, P](spec.Defaults, errors.New(degradedReason), env, nil)
+	proc := mcpsrv.Process{Source: spec.Name, Transport: "stdio"}
+	inv := mcpsrv.Inventory[C]{Global: spec.Defaults}
+	rt := mcpsrv.NewRuntime[C, P](inv, nil, proc, nil)
+	degradedRT := mcpsrv.NewRuntime[C, P](inv, errors.New(degradedReason), proc, nil)
 
 	prefix := spec.Source.Prefix()
 	statusName := prefix + "_read_status"
@@ -59,6 +62,19 @@ func Conformance[C any, P mcpsrv.ConfigPtr[C]](t *testing.T, spec mcpsrv.Spec[C]
 			if !read && marked != rt.Settings.Write.RequireConfirmation {
 				t.Errorf("write tool %q: confirmation marker = %v, want %v",
 					tool.Name, marked, rt.Settings.Write.RequireConfirmation)
+			}
+		}
+	})
+
+	t.Run("every source tool names a cluster", func(t *testing.T) {
+		for _, tool := range tools {
+			if tool.Name == statusName {
+				continue // the core's own, and it answers about the whole server
+			}
+			for _, arg := range []string{"environment", "cluster"} {
+				if !slices.Contains(argumentNames(tool.InputSchema), arg) {
+					t.Errorf("tool %q takes no %s argument; the core declares it for every tool", tool.Name, arg)
+				}
 			}
 		}
 	})
@@ -121,6 +137,18 @@ func requiresArguments(schema any) bool {
 	}
 	req, ok := obj["required"].([]any)
 	return ok && len(req) > 0
+}
+
+func argumentNames(schema any) []string {
+	obj, ok := schema.(map[string]any)
+	if !ok {
+		return nil
+	}
+	props, ok := obj["properties"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return slices.Collect(maps.Keys(props))
 }
 
 func connect(t *testing.T, server *mcp.Server) *mcp.ClientSession {

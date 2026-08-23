@@ -52,4 +52,11 @@
 
 ## Состояние в коде
 
-`internal/mcpsrv/config.go` (разрешение пути, `Load`, `Init`, `ConfigError`), `internal/mcpsrv/expand.go` (`${VAR}` и проверка секретов), `internal/mcpsrv/schema.go` (генерация, `--print-config-schema`, `SchemaURL`), `internal/source/postgres/config.go` (ключи, дефолты, `Validate`, `ClientDeadline`), `schema/postgres.schema.json` + `task schema:check`. Расхождений с решением нет; `--init`, `--http` и `--profile` как флаги процесса собираются в [#16](https://github.com/Conte777/infra-mcp/issues/16).
+`internal/mcpsrv/config.go` (разрешение пути, `Load`, `Init`, `ConfigError`), `internal/mcpsrv/cluster.go` (уровни конфига и наследование), `internal/mcpsrv/expand.go` (`${VAR}` и проверка секретов), `internal/mcpsrv/schema.go` (генерация, `--print-config-schema`, `SchemaURL`), `internal/source/postgres/config.go` (ключи, дефолты, `Validate`, `ClientDeadline`), `schema/postgres.schema.json` + `task schema:check`. `--init` и `--http` как флаги процесса собираются в [#16](https://github.com/Conte777/infra-mcp/issues/16).
+
+Расхождения после [#48](https://github.com/Conte777/infra-mcp/issues/48) — карта [#47](https://github.com/Conte777/infra-mcp/issues/47) пересматривает форму конфига, и переписать сам текст решения должен [#51](https://github.com/Conte777/infra-mcp/issues/51):
+
+- **конфиг больше не «файл на профиль»**: `--profile` и сегмент профиля в пути удалены, XDG-путь стал `infra-mcp/<источник>.json`, порядок поиска — `--config` > `INFRA_MCP_<ИСТОЧНИК>_CONFIG` > XDG. Один файл несёт все стенды и кластеры;
+- **форма файла — три уровня** (глобальный → стенд → кластер) вместо плоской: `Load` возвращает `Inventory[C]` — конфиг на каждый адрес, собранный слиянием сырого JSON;
+- **обязательных ключей в схеме больше нет**: `connection.host`, `connection.user`, `connection.password` и `databases.default` могут прийти с любого из трёх уровней, поэтому схема не требует их нигде, а `Config.Validate` проверяет присутствие на собранном конфиге кластера. Обязателен в схеме только `environments`;
+- **проверка секретов идёт по уровням**, а не по документу целиком: глобальный уровень, уровень стенда и собранный конфиг кластера — иначе литерал, перекрытый ниже, не попал бы ни в одну проверку.
