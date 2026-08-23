@@ -37,9 +37,45 @@ func TestLocationResolvePrefersFlag(t *testing.T) {
 	if path != loc.Flag {
 		t.Errorf("path = %q, want %q", path, loc.Flag)
 	}
-	// A named file that does not exist must not fall through to the env or XDG one.
 	if len(searched) != 1 {
 		t.Errorf("searched = %v, want only the flag", searched)
+	}
+}
+
+// The rule itself, not the --config example of it: a path the operator named
+// is returned as named even when the file is absent, and --init writes to that
+// same path. Falling through would answer with another environment's database.
+func TestLocationResolveKeepsAMissingNamedPath(t *testing.T) {
+	const missing = "/nonexistent/nope.json"
+	tests := []struct {
+		name  string
+		named func(t *testing.T, loc *Location)
+		want  string
+	}{
+		{"flag", func(_ *testing.T, loc *Location) { loc.Flag = missing }, missing},
+		{"env", func(t *testing.T, loc *Location) { t.Setenv(loc.EnvVar(), missing) }, "INFRA_MCP_POSTGRES_CONFIG=" + missing},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			loc := Location{Source: "postgres", Profile: "default"}
+			writeFile(t, loc.XDGPath(), "{}") // the trap: a readable file one candidate down
+			tt.named(t, &loc)
+
+			path, searched, err := loc.Resolve()
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if path != missing {
+				t.Errorf("path = %q, want the named %q", path, missing)
+			}
+			if len(searched) != 1 || searched[0] != tt.want {
+				t.Errorf("searched = %v, want [%q]", searched, tt.want)
+			}
+			if got := loc.InitPath(); got != path {
+				t.Errorf("InitPath = %q, but Resolve reads %q", got, path)
+			}
+		})
 	}
 }
 
@@ -49,6 +85,8 @@ func TestLocationResolveOrder(t *testing.T) {
 
 	xdg := filepath.Join(dir, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", xdg)
+	// A variable exported in the shell running the tests would win outright.
+	t.Setenv(loc.EnvVar(), "")
 	writeFile(t, filepath.Join(xdg, "infra-mcp", "postgres.default.json"), "{}")
 
 	path, _, err := loc.Resolve()
@@ -78,6 +116,7 @@ func TestLocationResolveOrder(t *testing.T) {
 func TestLocationResolveNothingFound(t *testing.T) {
 	loc := Location{Source: "postgres", Profile: "default"}
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "empty"))
+	t.Setenv(loc.EnvVar(), "")
 
 	_, searched, err := loc.Resolve()
 	if err == nil {
@@ -274,15 +313,37 @@ func TestInitWritesWhereResolveWouldLook(t *testing.T) {
 }
 
 func TestLoadReportsMissingFileAsConfigError(t *testing.T) {
-	loc := Location{Source: "test", Profile: "default", Flag: filepath.Join(t.TempDir(), "absent.json")}
-
-	_, err := Load(loc, testConfig{}, nil)
-	var cerr *ConfigError
-	if !errors.As(err, &cerr) {
-		t.Fatalf("Load error = %v, want a *ConfigError", err)
+	tests := []struct {
+		name  string
+		named func(t *testing.T, loc *Location, path string)
+	}{
+		{"flag", func(_ *testing.T, loc *Location, path string) { loc.Flag = path }},
+		{"env", func(t *testing.T, loc *Location, path string) { t.Setenv(loc.EnvVar(), path) }},
 	}
-	if cerr.Hint != initHint {
-		t.Errorf("Hint = %q, want %q", cerr.Hint, initHint)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The XDG file is there and still must not be the one reported.
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			loc := Location{Source: "test", Profile: "default"}
+			writeFile(t, loc.XDGPath(), "{}")
+			absent := filepath.Join(t.TempDir(), "absent.json")
+			tt.named(t, &loc, absent)
+
+			_, err := Load(loc, testConfig{}, nil)
+			var cerr *ConfigError
+			if !errors.As(err, &cerr) {
+				t.Fatalf("Load error = %v, want a *ConfigError", err)
+			}
+			if cerr.Path != absent {
+				t.Errorf("Path = %q, want the named %q", cerr.Path, absent)
+			}
+			if len(cerr.Searched) != 1 || !strings.Contains(cerr.Searched[0], absent) {
+				t.Errorf("Searched = %v, want only the named path", cerr.Searched)
+			}
+			if cerr.Hint != initHint {
+				t.Errorf("Hint = %q, want %q", cerr.Hint, initHint)
+			}
+		})
 	}
 }
 
