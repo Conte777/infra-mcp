@@ -33,7 +33,7 @@ type listTablesArgs struct {
 
 type describeArgs struct {
 	Args
-	Tables []string `json:"tables" jsonschema:"table names, optionally schema-qualified; an unqualified name resolves through search_path"`
+	Tables []string `json:"tables" jsonschema:"table names, optionally schema-qualified, at most 20; an unqualified name resolves through search_path"`
 }
 
 type sqlArgs struct {

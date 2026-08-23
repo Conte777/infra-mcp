@@ -3,6 +3,8 @@
 package postgres
 
 import (
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -90,6 +92,26 @@ func TestListDatabasesShowsWhatTheToolsCanReach(t *testing.T) {
 	}
 }
 
+// Which databases are reachable is decided in Go, after the query, so the
+// budget has to be spent there too — a LIMIT would cut by name and hide a
+// database an include names.
+func TestListDatabasesStopsAtMaxRowsAndSaysThereIsMore(t *testing.T) {
+	s, cfg := testSource(t, func(c *Config) { c.Output.MaxRows = 1 })
+
+	blocks, err := runRead(t, s, cfg, ConnectionArgs{Address: testCluster}, listDatabases)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	tbl := table(t, blocks)
+	if len(tbl.Rows) != 1 || !tbl.More {
+		t.Fatalf("%d rows, more = %v; want the budget honoured and the rest declared", len(tbl.Rows), tbl.More)
+	}
+	if out := render(t, cfg, blocks); !strings.HasPrefix(out, "Showing the first 1 rows and there are more") {
+		t.Errorf("notice missing or naming a total: %q", out)
+	}
+}
+
 func TestListTables(t *testing.T) {
 	s, cfg := testSource(t, nil)
 	exec(t, cfg, cfg.Databases.Default, `
@@ -137,6 +159,43 @@ func TestListTables(t *testing.T) {
 	narrowed := column(t, table(t, blocks), "table")
 	if len(narrowed) != 2 || !contains(narrowed, "public.orders") || !contains(narrowed, "public.order_items") {
 		t.Errorf("pattern order%% matched %v", narrowed)
+	}
+}
+
+func TestListTablesStopsAtMaxRowsAndSaysThereIsMore(t *testing.T) {
+	s, cfg := testSource(t, func(c *Config) { c.Output.MaxRows = 3 })
+	exec(t, cfg, cfg.Databases.Default,
+		`CREATE TABLE a (id int); CREATE TABLE b (id int); CREATE TABLE c (id int); CREATE TABLE d (id int)`)
+
+	blocks, err := runRead(t, s, cfg, listTablesArgs{Args: callArgs(cfg)}, listTables)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	tbl := table(t, blocks)
+	if len(tbl.Rows) != 3 || !tbl.More {
+		t.Fatalf("%d rows, more = %v; want the budget honoured and the rest declared", len(tbl.Rows), tbl.More)
+	}
+	if out := render(t, cfg, blocks); !strings.HasPrefix(out, "Showing the first 3 rows and there are more") {
+		t.Errorf("notice missing or naming a total: %q", out)
+	}
+}
+
+// The budget rides into the statement as a parameter, and a disabled one has to
+// reach postgres as the NULL that means "all of them" rather than as a zero.
+func TestListTablesWithoutARowBudgetIsWhole(t *testing.T) {
+	s, cfg := testSource(t, func(c *Config) { c.Output.MaxRows = 0 })
+	exec(t, cfg, cfg.Databases.Default,
+		`CREATE TABLE a (id int); CREATE TABLE b (id int); CREATE TABLE c (id int); CREATE TABLE d (id int)`)
+
+	blocks, err := runRead(t, s, cfg, listTablesArgs{Args: callArgs(cfg)}, listTables)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	tbl := table(t, blocks)
+	if len(tbl.Rows) != 4 || tbl.More || tbl.Total != 4 {
+		t.Fatalf("%d rows, more = %v, total = %d; want all four counted", len(tbl.Rows), tbl.More, tbl.Total)
 	}
 }
 
@@ -351,6 +410,29 @@ func TestDescribePartitionListStopsAtTheCeiling(t *testing.T) {
 	}
 }
 
+// The cost of a long list is round trips, not output: describeOne is up to six
+// of them per name, and the budget that trims the answer is spent long after
+// they have all been made.
+func TestDescribeRefusesMoreNamesThanFitInOneCall(t *testing.T) {
+	s, cfg := testSource(t, nil)
+
+	names := make([]string, maxTablesDescribed+1)
+	for i := range names {
+		names[i] = fmt.Sprintf("t%d", i)
+	}
+	_, err := runRead(t, s, cfg, describeArgs{Args: callArgs(cfg), Tables: names}, describeTable)
+
+	detail, hint := wantKind(t, err, mcpsrv.KindBadArgument)
+	// Not the "no table named t0" the same call would earn one name at a time:
+	// the refusal has to come before the first round trip.
+	if !strings.Contains(detail, fmt.Sprint(maxTablesDescribed)) {
+		t.Errorf("detail = %q, want the ceiling named", detail)
+	}
+	if hint == "" {
+		t.Error("the refusal does not say what to do instead")
+	}
+}
+
 // quote_ident doubles quotes and nothing else, so an identifier carrying a
 // newline ends the "--" comment it is printed in and leaves the rest reading as
 // catalog data. Whoever may CREATE TABLE picks that name.
@@ -538,6 +620,39 @@ func TestQueryStopsAtMaxRowsAndSaysThereIsMore(t *testing.T) {
 	}
 }
 
+// The cursor bounds how many rows are held, not how large one is. Nothing in
+// the rendered answer can show the difference — capCell cuts to the same width
+// either way — so the assertion is on what the blocks retain.
+func TestQueryHoldsNoMoreOfAValueThanItShows(t *testing.T) {
+	s, cfg := testSource(t, nil)
+	exec(t, cfg, cfg.Databases.Default,
+		`CREATE TABLE wide AS SELECT i, repeat('x', 1000000) AS blob FROM generate_series(1, 20) i`)
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	blocks, err := runRead(t, s, cfg, sqlArgs{Args: callArgs(cfg), SQL: "SELECT blob FROM wide"}, runQuery)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	held := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	runtime.KeepAlive(blocks)
+
+	// Twenty megabytes of values against twenty cells of maxCellChars*4 bytes:
+	// three orders of magnitude apart, so the ceiling tracks neither closely.
+	const ceiling = 4 << 20
+	if held > ceiling {
+		t.Errorf("the answer holds %d bytes of a 20 MB table, over the %d ceiling", held, ceiling)
+	}
+	if got := len(table(t, blocks).Rows); got != 20 {
+		t.Fatalf("%d rows, want the whole table", got)
+	}
+}
+
 func TestQueryReadsStatementsACursorCannotHold(t *testing.T) {
 	s, cfg := testSource(t, nil)
 
@@ -670,6 +785,41 @@ func TestExplain(t *testing.T) {
 	measured, _ := blocks[0].(block.Code)
 	if !strings.Contains(measured.Text, "actual time") {
 		t.Errorf("analyze did not run the statement:\n%s", measured.Text)
+	}
+}
+
+// A plan is read to the end whether or not it is kept, which is what lets the
+// notice name a total instead of the number of lines that happened to fit.
+func TestExplainNamesThePlanLinesItDidNotKeep(t *testing.T) {
+	const budget = 1200
+	s, cfg := testSource(t, func(c *Config) { c.Output.MaxBytes = budget })
+
+	arms := make([]string, 200)
+	for i := range arms {
+		arms[i] = fmt.Sprintf("SELECT %d AS i", i)
+	}
+	blocks, err := runRead(t, s, cfg, explainArgs{Args: callArgs(cfg), SQL: strings.Join(arms, " UNION ALL ")}, explain)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+
+	plan, ok := blocks[0].(block.Code)
+	if !ok {
+		t.Fatalf("block is %T, want a plan", blocks[0])
+	}
+	kept := strings.Count(plan.Text, "\n")
+	if plan.Total <= kept {
+		t.Fatalf("kept %d of %d lines; want the plan cut short of what was read", kept, plan.Total)
+	}
+	// Reading stops once the budget is reached, so the last line crosses it.
+	const longestPlanLine = 200
+	if len(plan.Text) > budget+longestPlanLine {
+		t.Errorf("the plan held %d bytes on a %d budget", len(plan.Text), budget)
+	}
+
+	out := render(t, cfg, blocks)
+	if !strings.Contains(out, fmt.Sprintf("of %d lines", plan.Total)) {
+		t.Errorf("the notice does not name the lines the source read: %q", out)
 	}
 }
 

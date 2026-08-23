@@ -125,9 +125,21 @@ WHERE i.indexrelid = $1`
 // DDL of the next table. Twenty already show the scheme (ADR-0004).
 const maxPartitionsListed = 20
 
+// A hard ceiling for the same reason as maxPartitionsListed, but paid in round
+// trips rather than output: describeOne costs up to six of them per name, all
+// sequential inside one transaction (ADR-0004).
+const maxTablesDescribed = 20
+
 func describeTable(ctx context.Context, tx pgx.Tx, _ Config, in describeArgs) ([]block.Block, error) {
 	if len(in.Tables) == 0 {
 		return nil, &mcpsrv.Failure{Kind: mcpsrv.KindBadArgument, Detail: "name at least one table"}
+	}
+	if len(in.Tables) > maxTablesDescribed {
+		return nil, &mcpsrv.Failure{
+			Kind:   mcpsrv.KindBadArgument,
+			Detail: fmt.Sprintf("named %d tables, and at most %d fit in one call", len(in.Tables), maxTablesDescribed),
+			Hint:   "ask for them in several calls, or narrow with list_tables first",
+		}
 	}
 
 	blocks := make([]block.Block, 0, len(in.Tables))

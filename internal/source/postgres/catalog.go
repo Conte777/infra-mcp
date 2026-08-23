@@ -27,6 +27,10 @@ func listDatabases(ctx context.Context, tx pgx.Tx, cfg Config, _ ConnectionArgs)
 	}
 	defer rows.Close()
 
+	// The budget is spent after the filter, not in a LIMIT: which databases are
+	// reachable is decided here in Go, so a SQL limit would cut by name and leave
+	// include: ["orders"] showing nothing on a cluster with enough databases.
+	limit := cfg.Output.MaxRows
 	t := block.Table{Columns: []string{"database", "size", "connectable", "comment"}}
 	for rows.Next() {
 		var name string
@@ -42,11 +46,14 @@ func listDatabases(ctx context.Context, tx pgx.Tx, cfg Config, _ ConnectionArgs)
 			continue
 		}
 		t.Rows = append(t.Rows, []any{name, value(size), allowsConnections, value(comment)})
+		if limit > 0 && len(t.Rows) > limit { // one row past the budget, as the cursor does
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	t.Total = len(t.Rows)
+	t.Cap(limit)
 	return []block.Block{t}, nil
 }
 
@@ -68,10 +75,21 @@ WHERE c.relkind IN ('r','v','m','p','f')
   AND n.nspname NOT LIKE 'pg_toast%'
   AND n.nspname NOT LIKE 'pg_temp%'
   AND ($1::text = '' OR c.relname ILIKE $1::text OR n.nspname || '.' || c.relname ILIKE $1::text)
-ORDER BY 1`
+ORDER BY 1
+LIMIT $2::bigint`
 
-func listTables(ctx context.Context, tx pgx.Tx, _ Config, in listTablesArgs) ([]block.Block, error) {
-	rows, err := tx.Query(ctx, listTablesSQL, in.Pattern)
+func listTables(ctx context.Context, tx pgx.Tx, cfg Config, in listTablesArgs) ([]block.Block, error) {
+	// Nothing filters these rows afterwards, so the budget belongs in the
+	// statement: a schema-per-tenant cluster would otherwise stream the whole of
+	// pg_class here to be thrown away. A NULL limit is postgres for "all of them".
+	limit := cfg.Output.MaxRows
+	var fetch *int64
+	if limit > 0 {
+		n := int64(limit) + 1 // one row past the budget, as the cursor does
+		fetch = &n
+	}
+
+	rows, err := tx.Query(ctx, listTablesSQL, in.Pattern, fetch)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +108,7 @@ func listTables(ctx context.Context, tx pgx.Tx, _ Config, in listTablesArgs) ([]
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	t.Total = len(t.Rows)
+	t.Cap(limit)
 	return []block.Block{t}, nil
 }
 
