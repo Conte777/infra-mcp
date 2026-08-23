@@ -31,11 +31,12 @@ infra-mcp-postgres --init                  # writes the file and prints its path
 infra-mcp-postgres --print-config-schema   # every key this build accepts
 ```
 
-That lands in `$XDG_CONFIG_HOME/infra-mcp/postgres.default.json`
-(`~/.config/...` by default); `INFRA_MCP_POSTGRES_CONFIG` points elsewhere.
-Fill in `connection`, and give the password as `${VAR}` — a literal password in
-the file is a validation error. The config is read once at startup, so restart
-the session after editing it.
+That lands in `$XDG_CONFIG_HOME/infra-mcp/postgres.json` (`~/.config/...` by
+default); `INFRA_MCP_POSTGRES_CONFIG` points elsewhere. One file holds every
+environment and every cluster in it: fill in the cluster `--init` wrote, and
+give the password as `${VAR}` — a literal password in the file is a validation
+error. The config is read once at startup, so restart the session after editing
+it.
 
 ### Approving the read tools once
 
@@ -53,18 +54,8 @@ over the `allow` above and take the read tools down with it.
 
 ### A second environment
 
-The plugin declares one server on profile `default`. A second environment is a
-second profile plus your own entry — the launcher inside the plugin moves with
-every update, so install the binary yourself for a stable path:
-
-```sh
-go install github.com/Conte777/infra-mcp/cmd/infra-mcp-postgres@latest
-infra-mcp-postgres --profile stage --init
-claude mcp add postgres-stage -- infra-mcp-postgres --profile stage
-```
-
-Its read tools are `mcp__postgres-stage__pg_read_*` — a plugin server and a
-manually added one are named differently in permission rules.
+Another entry under `environments` in the same file, and the one server reaches
+it: a tool call names the environment, the cluster and the database.
 
 ### Updating
 

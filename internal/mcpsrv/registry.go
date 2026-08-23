@@ -98,12 +98,6 @@ func Write[C any, In Addressed](r *Registry[C], action, description string, h Ha
 	register(r, accessWrite, action, description, h)
 }
 
-// readCore is the door for a read tool of the core's own, which answers about
-// the server rather than about one cluster and so takes no address.
-func readCore[C, In any](r *Registry[C], action, description string, h Handler[C, In]) {
-	register(r, accessRead, action, description, h)
-}
-
 type access string
 
 const (

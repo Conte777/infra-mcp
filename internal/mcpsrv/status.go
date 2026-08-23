@@ -31,7 +31,9 @@ func registerStatus[C any](r *Registry[C]) {
 		}
 	}
 
-	readCore(r, statusAction, "report which config this server loaded and how it is running",
+	// register, not [Read]: the core's own tool answers about the whole server,
+	// and Read takes only arguments that name one cluster.
+	register(r, accessRead, statusAction, "report which config this server loaded and how it is running",
 		func(context.Context, C, struct{}) ([]block.Block, error) {
 			return []block.Block{status(r)}, nil
 		})

@@ -61,15 +61,15 @@ type Settings struct {
 }
 
 // Settings implements [ConfigPtr].
-func (c *Common[K, R]) Settings() Settings {
+func (c *Common[Cluster, ReadTools]) Settings() Settings {
 	return Settings{Output: c.Output, Write: c.Tools.Write}
 }
 
 // Validate is the no-op a source overrides with the checks a schema cannot
 // state. It runs on a cluster's config, once inheritance has filled it in.
-func (c *Common[K, R]) Validate() error { return nil }
+func (c *Common[Cluster, ReadTools]) Validate() error { return nil }
 
-func (c *Common[K, R]) setSchemaURL(url string) { c.Schema = url }
+func (c *Common[Cluster, ReadTools]) setSchemaURL(url string) { c.Schema = url }
 
 // ConfigPtr constrains a source config to one that embeds [Common] and, for
 // the cluster half of it, [ClusterCommon]. The unexported methods are the
@@ -217,12 +217,12 @@ const (
 	schemaHint = "run with --print-config-schema for the keys this build accepts"
 )
 
-// noEnvironments is the diagnosis a 0.1 config gets. Checked before the schema,
-// which would answer the same file with a heap of unknown-key complaints and
-// never say what replaced them.
-const noEnvironments = "declares no environments: the connection settings that used to sit at the top level " +
-	"now live in a cluster, under environments.<environment>.clusters.<cluster>, and the top level keeps only " +
-	"what every cluster inherits"
+// noEnvironments is what a file with nothing to reach is told. It doubles as
+// the migration note, because an 0.1 config is exactly this file with the
+// source's keys still at the top level — but it does not claim the file is one.
+const noEnvironments = "declares no environments: every cluster lives under " +
+	"environments.<environment>.clusters.<cluster>, and the top level holds only what they inherit — " +
+	"which is where the connection settings of an 0.1 config belong"
 
 // Load reads the config for loc and resolves it into one config per cluster:
 // the file's global level, then the environment, then the cluster, each level
@@ -261,8 +261,11 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (I
 	if !ok {
 		return fail("is not a JSON object", nil)
 	}
-	environments, ok := root[keyEnvironments].(map[string]any)
-	if !ok || len(environments) == 0 {
+	// Before the schema, which would answer an 0.1 config with a heap of
+	// unknown-key complaints and never say what replaced them. A present but
+	// mistyped environments is left to the schema: it can name what it found
+	// there, and this cannot.
+	if envs, present := root[keyEnvironments]; !present || isEmptyObject(envs) {
 		return fail(noEnvironments, nil)
 	}
 
@@ -285,13 +288,13 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (I
 
 	inv := Inventory[C]{}
 	secrets := secretPaths[C]()
-	// Not validated: the global level is free to be incomplete, and every key
-	// missing from it is either supplied below or reported there.
-	inv.Global, err = decode[C, P](global, defaults, secrets, false)
+	inv.Global, err = decode(global, defaults, secrets)
 	if err != nil {
 		return fail(err.Error(), err)
 	}
 
+	// The schema has vouched for the shape of the document by now.
+	environments, _ := root[keyEnvironments].(map[string]any)
 	for _, envName := range slices.Sorted(maps.Keys(environments)) {
 		env, _ := environments[envName].(map[string]any)
 		clusters, _ := env[keyClusters].(map[string]any)
@@ -299,11 +302,23 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (I
 			return fail(fmt.Sprintf("environment %s declares no clusters", envName), nil)
 		}
 		level := inherit(global, without(env, keyClusters))
+		// The environment level is checked on its own account: a literal secret
+		// written here and overridden by every cluster under it would never
+		// reach a merged level to be caught there.
+		if err := checkSecrets(level, secrets); err != nil {
+			return fail(envName+": "+err.Error(), err)
+		}
 
 		for _, name := range slices.Sorted(maps.Keys(clusters)) {
 			cluster, _ := clusters[name].(map[string]any)
 			addr := Address{Environment: envName, Cluster: name}
-			cfg, err := decode[C, P](inherit(level, cluster), defaults, secrets, true)
+			cfg, err := decode(inherit(level, cluster), defaults, secrets)
+			if err == nil {
+				// Only a cluster is validated: the levels above it are free to
+				// be incomplete, and a key missing from all three is reported
+				// here, where it is finally missing.
+				err = P(&cfg).Validate()
+			}
 			if err != nil {
 				return fail(addr.String()+": "+err.Error(), err)
 			}
@@ -311,6 +326,11 @@ func Load[C any, P ConfigPtr[C]](loc Location, defaults C, types TypeSchemas) (I
 		}
 	}
 	return inv, nil
+}
+
+func isEmptyObject(v any) bool {
+	m, ok := v.(map[string]any)
+	return ok && len(m) == 0
 }
 
 // without is one level of the file with a key of the core's own taken out of
@@ -325,7 +345,7 @@ func without(level map[string]any, key string) map[string]any {
 // because after expansion a ${VAR} and a literal are the same string, and the
 // round trip through JSON applies the object on top of defaults, so a key it
 // leaves out keeps the default.
-func decode[C any, P ConfigPtr[C]](level map[string]any, defaults C, secrets [][]string, validate bool) (C, error) {
+func decode[C any](level map[string]any, defaults C, secrets [][]string) (C, error) {
 	var zero C
 	if err := checkSecrets(level, secrets); err != nil {
 		return zero, err
@@ -341,11 +361,6 @@ func decode[C any, P ConfigPtr[C]](level map[string]any, defaults C, secrets [][
 	cfg := defaults
 	if err := json.Unmarshal(normalized, &cfg); err != nil {
 		return zero, fmt.Errorf("cannot be decoded: %w", err)
-	}
-	if validate {
-		if err := P(&cfg).Validate(); err != nil {
-			return zero, err
-		}
 	}
 	return cfg, nil
 }

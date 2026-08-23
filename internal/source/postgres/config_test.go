@@ -165,6 +165,20 @@ func TestLoadKeepsAnExplicitFalse(t *testing.T) {
 	}
 }
 
+// A key of the wrong type is the schema's to describe: it can say what it found
+// there, and the note about a file with no environments in it cannot.
+func TestLoadLeavesAMistypedEnvironmentsToTheSchema(t *testing.T) {
+	loc := configAt(t, `{"environments": []}`)
+
+	_, err := mcpsrv.Load(loc, postgres.Defaults(), postgres.ConfigTypes())
+	if err == nil {
+		t.Fatal("Load accepted environments as an array")
+	}
+	if !strings.Contains(err.Error(), "schema") {
+		t.Errorf("error %q does not come from the schema", err)
+	}
+}
+
 // A 0.1 file is recognised by what it lacks, before the schema gets to answer
 // it with a heap of unknown-key complaints that never say what replaced them.
 func TestLoadExplainsTheOldShape(t *testing.T) {
@@ -210,6 +224,18 @@ func TestLoadRejects(t *testing.T) {
 			name:   "a key nothing supplies at any level",
 			body:   oneCluster(`{"connection":{"host":"h","user":"u","password":"${INFRA_MCP_TEST_PASSWORD}"}}`),
 			reason: "databases.default",
+		},
+		{
+			// A literal at a level every cluster overrides never reaches a
+			// merged cluster, so the level itself has to be checked.
+			name: "literal password one level up",
+			body: `{
+			  "environments": {"dev": {
+			    "connection": {"host": "h", "user": "u", "password": "hunter2"},
+			    "clusters": {"main": {"connection": {"password": "${INFRA_MCP_TEST_PASSWORD}"}, "databases": {"default": "d"}}}
+			  }}
+			}`,
+			reason: "connection.password",
 		},
 		{
 			name:   "literal password",
