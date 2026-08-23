@@ -35,7 +35,14 @@ func registerStatus[C any](r *Registry[C]) {
 	// and Read takes only arguments that name one cluster.
 	register(r, accessRead, statusAction, "report which config this server loaded, which clusters it serves and how it is running",
 		func(context.Context, C, struct{}) ([]block.Block, error) {
-			return []block.Block{status(r), clusters(r.rt.Inventory)}, nil
+			blocks := []block.Block{status(r)}
+			// A header with no rows under it is worse than no table: [Load]
+			// leaves no server without a cluster, but [Build] can be called
+			// with an inventory that was not assembled by it.
+			if len(r.rt.Inventory.Clusters) > 0 {
+				blocks = append(blocks, clusters(r.rt.Inventory))
+			}
+			return blocks, nil
 		})
 }
 

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -143,37 +142,6 @@ func Build[C any](spec Spec[C], rt Runtime[C]) *mcp.Server {
 	spec.Source.Tools(r)
 	registerStatus(r)
 	return server
-}
-
-// instructions is the source's text with the addresses this server serves
-// under it. The core appends them rather than handing the config to the
-// source: the names and readOnly are the core's, and with three required
-// arguments and no defaults a model that does not know them cannot call a
-// single tool.
-func instructions[C any](spec Spec[C], rt Runtime[C]) string {
-	var b strings.Builder
-	b.WriteString(strings.TrimRight(spec.Source.Instructions(), "\n"))
-	b.WriteString("\n\n")
-
-	// A healthy start with no cluster cannot come out of [Load], so an empty
-	// inventory is a degraded one. The reason itself is left out: every tool
-	// call answers with it already.
-	if len(rt.Inventory.Clusters) == 0 {
-		fmt.Fprintf(&b, "This server reaches no clusters, because its config did not load. "+
-			"Call %s_read_%s for the reason.\n", spec.Source.Prefix(), statusAction)
-		return b.String()
-	}
-
-	b.WriteString("Clusters this server serves, written <environment>/<cluster> — the two\n" +
-		"arguments every tool takes; (readOnly) means every write tool is refused\nthere:\n")
-	for _, c := range rt.Inventory.Clusters {
-		b.WriteString("  " + c.Address.String())
-		if c.ReadOnly {
-			b.WriteString(" (readOnly)")
-		}
-		b.WriteByte('\n')
-	}
-	return b.String()
 }
 
 func serve[C any, P ConfigPtr[C]](spec Spec[C], loc Location, opts options, log *slog.Logger) int {

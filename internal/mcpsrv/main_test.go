@@ -70,6 +70,20 @@ func buildSession(t *testing.T, degraded error) *mcp.ClientSession {
 	return connect(t, Build(spec, NewRuntime(testInventory(), degraded, testProcess(), nil)))
 }
 
+var readOnlyAddress = Address{Environment: "prod", Cluster: "analytics"}
+
+// twoClusterSession serves one plain cluster and one readOnly, which is what
+// the inventory has to tell apart.
+func twoClusterSession(t *testing.T) *mcp.ClientSession {
+	t.Helper()
+	spec := testSpec()
+	inv := testInventory(
+		Cluster[testConfig]{Address: testAddress, Config: spec.Defaults},
+		Cluster[testConfig]{Address: readOnlyAddress, Config: spec.Defaults, ReadOnly: true},
+	)
+	return connect(t, Build(spec, NewRuntime(inv, nil, testProcess(), nil)))
+}
+
 // The status tool takes no arguments, every other fake tool takes testIn.
 func callTool(t *testing.T, cs *mcp.ClientSession, name string) *mcp.CallToolResult {
 	t.Helper()
@@ -114,27 +128,24 @@ func TestInstructionsReachInitialize(t *testing.T) {
 // Three required arguments and no defaults: without this list the model cannot
 // name an address, and so cannot call a single tool.
 func TestInstructionsListEveryAddress(t *testing.T) {
-	spec := testSpec()
-	inv := testInventory(
-		Cluster[testConfig]{Address: testAddress, Config: spec.Defaults},
-		Cluster[testConfig]{Address: Address{Environment: "prod", Cluster: "main"}, Config: spec.Defaults, ReadOnly: true},
-	)
-	cs := connect(t, Build(spec, NewRuntime(inv, nil, testProcess(), nil)))
+	cs := twoClusterSession(t)
 
 	got := cs.InitializeResult().Instructions
 
 	if !strings.Contains(got, "dev/main\n") {
 		t.Errorf("instructions = %q, want dev/main unmarked", got)
 	}
-	if !strings.Contains(got, "prod/main (readOnly)") {
+	if !strings.Contains(got, "prod/analytics (readOnly)") {
 		t.Errorf("instructions = %q, want the readOnly cluster marked", got)
 	}
 }
 
 // The reason is left out on purpose: every tool call answers with it, and the
 // instructions are paid for once per session whether or not it is read.
+// The inventory carries clusters here, and the degraded start still may not
+// advertise them: every call to one answers with the config error instead.
 func TestDegradedInstructionsPointAtStatusWithoutTheReason(t *testing.T) {
-	cs := connect(t, Build(testSpec(), NewRuntime(Inventory[testConfig]{}, errors.New("no config: none found"), testProcess(), nil)))
+	cs := buildSession(t, errors.New("no config: none found"))
 
 	got := cs.InitializeResult().Instructions
 
@@ -143,6 +154,9 @@ func TestDegradedInstructionsPointAtStatusWithoutTheReason(t *testing.T) {
 	}
 	if strings.Contains(got, "none found") {
 		t.Errorf("instructions = %q, want the diagnosis left to the tool calls", got)
+	}
+	if strings.Contains(got, testAddress.String()) {
+		t.Errorf("instructions = %q, want no address a call cannot reach", got)
 	}
 }
 
@@ -208,16 +222,11 @@ func TestStatusReportsTheConfigItSettledOn(t *testing.T) {
 }
 
 func TestStatusNamesEveryClusterAndItsReadOnly(t *testing.T) {
-	spec := testSpec()
-	inv := testInventory(
-		Cluster[testConfig]{Address: testAddress, Config: spec.Defaults},
-		Cluster[testConfig]{Address: Address{Environment: "prod", Cluster: "main"}, Config: spec.Defaults, ReadOnly: true},
-	)
-	cs := connect(t, Build(spec, NewRuntime(inv, nil, testProcess(), nil)))
+	cs := twoClusterSession(t)
 
 	got := resultText(t, callTool(t, cs, "tt_read_status"))
 
-	for _, want := range []string{"|environment|cluster|readOnly|", "|dev|main|false|", "|prod|main|true|"} {
+	for _, want := range []string{"|environment|cluster|readOnly|", "|dev|main|false|", "|prod|analytics|true|"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("status = %q, want it to carry %q", got, want)
 		}
