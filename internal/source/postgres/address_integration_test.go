@@ -165,16 +165,29 @@ func mustCall(t *testing.T, cs *mcp.ClientSession, name string, in map[string]an
 }
 
 // firstColumn reads a rendered markdown table back: what the model gets is text,
-// and a test that read the blocks would be testing a different thing.
+// and a test that read the blocks would be testing a different thing. Rows are
+// taken from the separator line down rather than from a fixed offset, so a
+// notice above the table makes a test fail instead of reading the header as a
+// row.
 func firstColumn(t *testing.T, out string) []string {
 	t.Helper()
 
 	var rows []string
-	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if i < 2 || !strings.HasPrefix(line, "|") {
-			continue // the header and the separator under it
+	body := false
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if !strings.HasPrefix(line, "|") {
+			continue
 		}
-		rows = append(rows, strings.Split(strings.Trim(line, "|"), "|")[0])
+		if strings.Trim(line, "|-") == "" {
+			body = true
+			continue
+		}
+		if body {
+			rows = append(rows, strings.Split(strings.Trim(line, "|"), "|")[0])
+		}
+	}
+	if !body {
+		t.Fatalf("no table in the answer:\n%s", out)
 	}
 	return rows
 }

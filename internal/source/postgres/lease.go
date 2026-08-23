@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -193,7 +194,7 @@ func resolveDatabase(cfg Config, name string, named bool) (string, error) {
 		}
 	}
 	if pat, ok := matches(cfg.Databases.Exclude, name); ok {
-		return denied(fmt.Sprintf("database %q is hidden by databases.exclude (%q)", name, pat), "")
+		return denied(fmt.Sprintf("database %q is hidden by databases.exclude (%q)", name, pat), listHint)
 	}
 	return name, nil
 }
@@ -201,10 +202,18 @@ func resolveDatabase(cfg Config, name string, named bool) (string, error) {
 // matches is the first pattern name matches. The patterns were checked when the
 // config loaded, so a match error is not reachable here.
 func matches(patterns []string, name string) (string, bool) {
+	name = flatten(name)
 	for _, pat := range patterns {
-		if ok, _ := path.Match(pat, name); ok {
+		if ok, _ := path.Match(flatten(pat), name); ok {
 			return pat, true
 		}
 	}
 	return "", false
 }
+
+// flatten takes "/" out of path.Match's way. A database name is not a path, and
+// a quoted identifier may hold a slash — but * and ? refuse to cross one, so
+// exclude: ["tmp_*"] would let "tmp_a/b" through, which is the wrong direction
+// for a filter to fail in. NUL is the one byte an identifier cannot hold, so
+// standing it in on both sides settles the question rather than hiding it.
+func flatten(s string) string { return strings.ReplaceAll(s, "/", "\x00") }

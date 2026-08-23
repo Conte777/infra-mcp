@@ -47,6 +47,16 @@ func TestResolveDatabase(t *testing.T) {
 			exclude: []string{"tmp_1"}, arg: "tmp_1", named: true, kind: mcpsrv.KindDenied,
 		},
 		{name: "exclude hides", exclude: []string{"tmp_*"}, arg: "tmp_1", named: true, kind: mcpsrv.KindDenied},
+		{
+			// A quoted identifier may hold a slash, and path.Match reads one as
+			// a path separator that * refuses to cross.
+			name: "exclude hides a name with a slash in it", exclude: []string{"tmp_*"},
+			arg: "tmp_a/b", named: true, kind: mcpsrv.KindDenied,
+		},
+		{
+			name: "include reaches a name with a slash in it", include: []string{"rep_*"},
+			arg: "rep_a/b", named: true, want: "rep_a/b",
+		},
 		{name: "exclude misses", exclude: []string{"tmp_*"}, arg: "other", named: true, want: "other"},
 		{
 			// The schema marks the argument required, which says nothing about
