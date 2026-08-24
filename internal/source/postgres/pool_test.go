@@ -223,7 +223,9 @@ func TestPoolsForgetLeavesASuccessorAlone(t *testing.T) {
 	_, releaseB := mustAcquire(t, p, cfg, "b") // evicts the busy "a"
 	defer releaseB()
 	second, releaseSecond := mustAcquire(t, p, cfg, "a") // a new entry for the same address
-	defer releaseSecond()
+	// Released, so that a wrong drop closes the successor then and there: held,
+	// it would leave the cache alive and only the map lookup below would notice.
+	releaseSecond()
 
 	if first == second {
 		t.Fatal("the evicted pool came back out of the cache")
@@ -232,10 +234,10 @@ func TestPoolsForgetLeavesASuccessorAlone(t *testing.T) {
 	p.forget(at("a"), first)
 
 	e, ok := p.byAddr[at("a")]
-	if !ok {
-		t.Fatal("forget dropped the entry of a pool it was not given")
-	}
-	if e.pool != second {
+	switch {
+	case !ok:
+		t.Error("forget dropped the entry of a pool it was not given")
+	case e.pool != second:
 		t.Errorf("the address holds %p, want the successor %p", e.pool, second)
 	}
 	if closed(t, second) {
