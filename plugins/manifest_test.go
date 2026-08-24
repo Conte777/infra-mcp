@@ -82,22 +82,28 @@ func TestManifestVersionIsATagWithoutThePrefix(t *testing.T) {
 
 // The CHANGELOG carries no Unreleased heading: a section exists only for a
 // released version, and the pull request that bumps the manifests is what
-// writes it (ADR-0005). A bump without a section is therefore a release nobody
-// described, and it surfaces only to whoever reads the file months later.
-func TestManifestVersionHasAChangelogSection(t *testing.T) {
+// writes it (ADR-0005). The newest section and the manifest version are then
+// one fact written twice, and either half can go missing — a bump with no
+// section is a release nobody described, a section with no bump describes a
+// version nobody can install. Both surface only months later, to whoever reads
+// the file.
+func TestChangelogLeadsWithTheManifestVersion(t *testing.T) {
 	const changelog = "../CHANGELOG.md"
 
 	raw, err := os.ReadFile(changelog)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The first heading is the newest release. The date on the same line is
+	// prose — it is written one merge before the tag it dates — so only the
+	// version is compared.
+	newest := regexp.MustCompile(`(?m)^## \[([^\]]+)\]`).FindSubmatch(raw)
+	if newest == nil {
+		t.Fatalf("%s carries no `## [version]` section", changelog)
+	}
 	for _, path := range manifests(t) {
-		v := manifestVersion(t, path)
-		// Only the version is matched. The date on the same line is prose: it is
-		// written one merge before the tag it dates.
-		section := regexp.MustCompile(`(?m)^## \[` + regexp.QuoteMeta(v) + `\]`)
-		if !section.Match(raw) {
-			t.Errorf("%s: version %q has no `## [%s]` section in %s", path, v, v, changelog)
+		if v := manifestVersion(t, path); v != string(newest[1]) {
+			t.Errorf("%s: version %q, but %s leads with %q", path, v, changelog, newest[1])
 		}
 	}
 }

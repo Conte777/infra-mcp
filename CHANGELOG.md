@@ -1,6 +1,7 @@
 # Changelog
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) with
+one rubric added — `Breaking`, which is what a release here leads with. A
 section exists only for a released version — the tag the plugin manifests name —
 and is written by the pull request that bumps them, so there is no `Unreleased`
 heading to keep in sync (ADR-0005).
@@ -12,22 +13,26 @@ heading to keep in sync (ADR-0005).
 - **One config file holds every environment and cluster.** The top-level
   `connection` of an 0.1 config is gone: every cluster lives under
   `environments.<environment>.clusters.<cluster>`, and the levels above hold
-  only what those clusters inherit. A file still in the old shape is refused at
-  startup by a message naming the replacement, not by a heap of unknown-key
-  complaints.
+  only what those clusters inherit. A file still in the old shape does not stop
+  the server: it starts degraded, and every tool call answers with a message
+  naming the replacement rather than a heap of unknown-key complaints.
 - **The config file is `infra-mcp/postgres.json`**, not
   `infra-mcp/postgres.default.json`: `--profile` is gone along with the profile
   itself, and one server now reaches every environment. The search order is
   `--config`, then `INFRA_MCP_POSTGRES_CONFIG`, then XDG.
-- **Every tool call names an address.** `environment`, `cluster` and `database`
-  are three required arguments with no defaults: a single-environment config no
-  longer starts answering calls that omit it, and none of them will start
-  answering differently when a second cluster is added.
-- **`databases.showAll` is gone**, replaced by `include` and `exclude` — glob
-  lists, inherited like everything else. **The default flipped from closed to
-  open**: a cluster naming no `include` reaches every database in it, where 0.1
-  reached only `default`. A config that relied on the old default widens
-  silently rather than failing, because it is a valid 0.2 config.
+- **Every tool call says where it lands.** `environment` and `cluster` are
+  required on every tool that reaches a cluster, and `database` on every one
+  that opens a connection — `pg_read_list_databases` needs the first two,
+  `pg_read_status` needs none. None of them is defaulted: a single-environment
+  config no longer answers a call that omits it, and no call will start landing
+  somewhere else when a second cluster is added.
+- **`databases.showAll` is gone.** What a cluster reaches is said by
+  `databases.include`, a glob list; `exclude`, which in 0.1 only subtracted from
+  `showAll`, now subtracts always. Both are inherited like everything else.
+  **The default flipped from closed to open**: a cluster naming no `include`
+  reaches every database in it, where 0.1 reached only the one named by
+  `databases.default`. A config that relied on the old default widens silently
+  rather than failing, because it is a valid 0.2 config.
 - **`databases.default` is only the entry point for catalogue queries**,
   defaulting to `postgres`. It no longer carries reachability of its own —
   `include` and `exclude` decide it like any other name, so
@@ -35,10 +40,16 @@ heading to keep in sync (ADR-0005).
 
 ### Security
 
-- **The deny-list closes a class of functions, not the names it happened to
-  know.** Entries match as globs, which closed three holes an exact list left
-  open: `pg_file_write` from `adminpack`, `dblink_connect*`, and `pg_ls_*dir`.
-  Of these `pg_logical_emit_message` is the one that needs no superuser.
+- **The deny-list closes classes of functions, not the names it happened to
+  know.** Entries match as globs, and the list was rebuilt against `pg_catalog`
+  instead of extended by hand. 0.1 named `pg_read_file`, `pg_read_binary_file`,
+  `pg_stat_file` and `pg_ls_dir`, so `pg_file_write` from `adminpack`,
+  `pg_ls_waldir` and `dblink_connect` all went through; 0.2 carries
+  `pg_read_*`, `pg_ls_*`, `pg_file_*` and `dblink_*`, and puts the
+  replication-slot, backup/WAL and log-emitting families on whole.
+  `pg_logical_emit_message`, new on the list, is the one entry on it that needs
+  no superuser: EXECUTE is PUBLIC, and a non-transactional message survives the
+  rollback meant to undo it.
 - **The deny-list can no longer be removed by how the statement is written.**
   The scan lexes the statement the way postgres does, so a name is found inside
   a Unicode escape (`U&"..."`), an escape string (`E'...'`), or a pair of
