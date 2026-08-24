@@ -203,11 +203,19 @@ func (p *pools) sweepIdle() []*pgxpool.Pool {
 // forget drops the pool for addr when the call that opened it never got a
 // connection. An entry that cannot connect is still an entry: three wrong
 // database names would push the working pool out of a cache of four.
-func (p *pools) forget(addr address) {
+//
+// pool is what says the entry is still the caller's own: an eviction can have
+// replaced it since acquire — evicting a busy pool is legal — and the successor
+// is healthy. Every entry gets its own pgxpool, so the pointer is its identity.
+func (p *pools) forget(addr address, pool *pgxpool.Pool) {
 	p.mu.Lock()
 	var stale *pgxpool.Pool
 	if e, ok := p.byAddr[addr]; ok {
-		stale = p.drop(e)
+		if e.pool == pool {
+			stale = p.drop(e)
+		} else {
+			p.log.Debug("pool replaced before forget", "address", addr)
+		}
 	}
 	p.mu.Unlock()
 

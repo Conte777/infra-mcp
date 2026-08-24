@@ -111,7 +111,7 @@ func inTx[In Input](s *Source, mode pgx.TxAccessMode, h TxFunc[In]) mcpsrv.Handl
 			// database name would otherwise push a working pool out.
 			var connErr *pgconn.ConnectError
 			if errors.As(err, &connErr) {
-				s.pools.forget(addr)
+				s.pools.forget(addr, pool)
 			}
 			return nil, failure(ctx, cfg, err)
 		}
