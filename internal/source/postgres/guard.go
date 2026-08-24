@@ -73,7 +73,8 @@ var denyFunctions = []string{
 
 // guardRead is everything checked before a read statement reaches the server.
 func guardRead(cfg Config, sql string) error {
-	kw := firstKeyword(sql)
+	toks := tokens(sql)
+	kw := firstKeyword(toks)
 	if kw == "" {
 		return &mcpsrv.Failure{Kind: mcpsrv.KindBadArgument, Detail: "no statement to run"}
 	}
@@ -85,8 +86,7 @@ func guardRead(cfg Config, sql string) error {
 			Hint: "a write tool of this server is the only way to change anything",
 		}
 	}
-	scan := scannable(sql)
-	if name, pattern := deniedCall(cfg, scan); name != "" {
+	if name, pattern := deniedCall(cfg, toks); name != "" {
 		detail := fmt.Sprintf("%s() has effects a read-only transaction does not undo, so it is on the deny list", name)
 		// The pattern is worth printing only when it is not the name again: it
 		// says why a call the list does not spell out is on it.
@@ -102,7 +102,7 @@ func guardRead(cfg Config, sql string) error {
 	// COPY cannot start a readable statement and cannot be nested in one, so the
 	// keyword check above already blocks it; the second lock is here because the
 	// deny list is meant to hold on its own (ADR-0001).
-	if copiesToProgram(scan) {
+	if copiesToProgram(toks) {
 		return &mcpsrv.Failure{
 			Kind:   mcpsrv.KindDenied,
 			Detail: "COPY … TO/FROM PROGRAM runs a shell command on the database server",
@@ -111,93 +111,32 @@ func guardRead(cfg Config, sql string) error {
 	return nil
 }
 
-// firstKeyword is the first word of the statement, lowercased, with leading
-// comments and parentheses skipped: "-- find users\n(SELECT …)" starts with
-// select, and a model writes both.
-func firstKeyword(sql string) string {
-	s := strings.TrimLeftFunc(sql, unicode.IsSpace)
-	for s != "" {
-		switch {
-		case strings.HasPrefix(s, "--"):
-			if i := strings.IndexByte(s, '\n'); i >= 0 {
-				s = s[i+1:]
-			} else {
-				s = ""
-			}
-		case strings.HasPrefix(s, "/*"):
-			s = s[skipBlockComment(s):]
-		case s[0] == '(':
-			s = s[1:]
-		default:
-			end := strings.IndexFunc(s, func(r rune) bool { return !isIdentRune(r) })
-			if end < 0 {
-				end = len(s)
-			}
-			return strings.ToLower(s[:end])
+// firstKeyword is the first word of the statement, with leading comments and
+// parentheses skipped: "-- find users\n(SELECT …)" starts with select, and a
+// model writes both. A quoted identifier is never a keyword, so it ends the
+// search rather than starting the statement.
+func firstKeyword(toks []token) string {
+	for _, t := range toks {
+		if t.kind == tokenPunct && t.text == "(" {
+			continue
 		}
-		s = strings.TrimLeftFunc(s, unicode.IsSpace)
+		if t.kind != tokenWord {
+			return ""
+		}
+		return t.text
 	}
 	return ""
 }
 
-// skipBlockComment is the length of the comment starting at s. Postgres nests
-// block comments, so the closing marker is found by counting, not by searching.
-func skipBlockComment(s string) int {
-	depth, i := 1, 2
-	for depth > 0 && i < len(s) {
-		switch {
-		case strings.HasPrefix(s[i:], "/*"):
-			depth++
-			i += 2
-		case strings.HasPrefix(s[i:], "*/"):
-			depth--
-			i += 2
-		default:
-			i++
-		}
-	}
-	return min(i, len(s))
-}
-
-// scannable is the statement as the deny list must read it: lowercased, with
-// comments replaced by a space and quoting marks dropped, because
-// pg_read_file/**/() and "pg_read_file"() are both calls to it. A comment
-// becomes a space rather than nothing — postgres ends the identifier there too.
-func scannable(sql string) string {
-	var b strings.Builder
-	b.Grow(len(sql))
-	for i := 0; i < len(sql); {
-		switch {
-		case strings.HasPrefix(sql[i:], "--"):
-			j := strings.IndexByte(sql[i:], '\n')
-			if j < 0 {
-				i = len(sql)
-			} else {
-				i += j
-			}
-			b.WriteByte(' ')
-		case strings.HasPrefix(sql[i:], "/*"):
-			i += skipBlockComment(sql[i:])
-			b.WriteByte(' ')
-		case sql[i] == '"':
-			i++
-		default:
-			b.WriteByte(sql[i])
-			i++
-		}
-	}
-	return strings.ToLower(b.String())
-}
-
-// String literals are left in on purpose: a name matched inside one costs a
+// String literals are read on purpose: a name matched inside one costs a
 // refusal on a legitimate query, while skipping the literal would let a call
 // hide behind a quote.
-func deniedCall(cfg Config, scan string) (name, pattern string) {
+func deniedCall(cfg Config, toks []token) (name, pattern string) {
 	patterns := slices.Concat(denyFunctions, cfg.Tools.Read.ExtraDenyFunctions)
 	for i, pat := range patterns {
 		patterns[i] = flatten(strings.ToLower(strings.TrimSpace(pat)))
 	}
-	for _, call := range calledNames(scan) {
+	for _, call := range calledNames(toks) {
 		for _, pat := range patterns {
 			if ok, _ := path.Match(pat, flatten(call)); ok {
 				return call, pat
@@ -207,54 +146,68 @@ func deniedCall(cfg Config, scan string) (name, pattern string) {
 	return "", ""
 }
 
-// calledNames is every identifier sql applies to arguments: the bare name
-// followed by "(". Requiring the parenthesis keeps a row that merely contains
-// the word off the deny list, and a schema qualification does not hide the call
-// — "." is not an identifier character, so pg_catalog.pg_ls_dir is scanned as
-// pg_ls_dir. A call through a view or a function body is invisible.
-func calledNames(sql string) []string {
+// calledNames is every name the statement applies to arguments: an identifier
+// whose next token is "(", plus whatever a string constant spells that way.
+// Requiring the parenthesis keeps a row that merely contains the word off the
+// deny list, and a schema qualification does not hide the call — "." is a token
+// of its own, so pg_catalog.pg_ls_dir is scanned as pg_ls_dir. A call through a
+// view or a function body is invisible.
+func calledNames(toks []token) []string {
+	var names []string
+	for i, t := range toks {
+		switch t.kind {
+		case tokenWord, tokenName:
+			if i+1 < len(toks) && toks[i+1].kind == tokenPunct && toks[i+1].text == "(" {
+				names = append(names, t.text)
+			}
+		case tokenString:
+			names = append(names, namesInText(t.text)...)
+		}
+	}
+	return names
+}
+
+// namesInText is the same "identifier followed by (" scan run inside a string
+// constant, where there are no tokens to lean on: a name can be assembled there
+// and passed to something that calls it.
+func namesInText(s string) []string {
 	var names []string
 	start := -1
-	for i, r := range sql {
+	for i, r := range s {
 		if isIdentRune(r) {
 			if start < 0 {
 				start = i
 			}
 			continue
 		}
-		if start >= 0 && applied(sql[i:]) {
-			names = append(names, sql[start:i])
+		if start >= 0 && strings.HasPrefix(strings.TrimLeftFunc(s[i:], unicode.IsSpace), "(") {
+			names = append(names, s[start:i])
 		}
 		start = -1
 	}
 	return names
 }
 
-// applied reports whether the identifier that just ended is followed by its
-// argument list. The scan runs on [scannable] output, where a comment is already
-// a space, so pg_read_file/**/() is one call.
-func applied(rest string) bool {
-	return strings.HasPrefix(strings.TrimLeftFunc(rest, unicode.IsSpace), "(")
-}
-
-// copiesToProgram reports whether scan runs COPY … TO/FROM PROGRAM. A quote
-// ends a word as whitespace does: postgres lets the literal abut the keyword,
-// so PROGRAM'sh -c evil' is one field but two words. The quote also ends the
-// word it opens, which is why a literal reading "… copy … to program …" is
-// refused too — the price of scanning literals that deniedCall already pays.
-func copiesToProgram(scan string) bool {
-	words := strings.FieldsFunc(scan, func(r rune) bool { return unicode.IsSpace(r) || r == '\'' })
-	if !slices.Contains(words, "copy") {
+// copiesToProgram reports whether the statement runs COPY … TO/FROM PROGRAM.
+// PROGRAM takes a string constant, and requiring it is what keeps the words
+// apart from a table called program in "FROM program.copy"; it also lets
+// PROGRAM'sh -c evil' through unbroken, which postgres accepts and a scan by
+// whitespace missed (#65). A literal spelling the words holds no statement, so
+// unlike the deny list this lock does not read inside one.
+func copiesToProgram(toks []token) bool {
+	if !slices.ContainsFunc(toks, func(t token) bool { return t.kind == tokenWord && t.text == "copy" }) {
 		return false
 	}
-	for i, w := range words {
-		if i > 0 && w == "program" && (words[i-1] == "to" || words[i-1] == "from") {
+	for i, t := range toks {
+		if i == 0 || t.kind != tokenWord || t.text != "program" {
+			continue
+		}
+		if prev := toks[i-1]; prev.kind != tokenWord || (prev.text != "to" && prev.text != "from") {
+			continue
+		}
+		if i+1 < len(toks) && toks[i+1].kind == tokenString {
 			return true
 		}
 	}
 	return false
-}
-
-func isIdentRune(r rune) bool {
-	return r == '_' || r == '$' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }

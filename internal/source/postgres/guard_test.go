@@ -24,11 +24,13 @@ func TestFirstKeyword(t *testing.T) {
 		{"empty", "   \n\t ", ""},
 		{"write", "delete from t", "delete"},
 		{"nothing after the keyword", "select", "select"},
+		{"a quoted identifier is not a keyword", `"select" 1`, ""},
+		{"a literal does not start a statement", "'select' 1", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := firstKeyword(tt.sql); got != tt.want {
+			if got := firstKeyword(tokens(tt.sql)); got != tt.want {
 				t.Errorf("firstKeyword(%q) = %q, want %q", tt.sql, got, tt.want)
 			}
 		})
@@ -225,7 +227,7 @@ func TestCalledNames(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := calledNames(tt.sql)
+			got := calledNames(tokens(tt.sql))
 			if len(got) != len(tt.want) {
 				t.Fatalf("calledNames(%q) = %v, want %v", tt.sql, got, tt.want)
 			}
@@ -238,32 +240,9 @@ func TestCalledNames(t *testing.T) {
 	}
 }
 
-// scannable decides what both later checks even see (#65). The forms
-// TestGuardRead already drives end to end are repeated here on purpose: there
-// they say a call is refused, here they say what the text became.
-func TestScannable(t *testing.T) {
-	tests := []struct{ name, sql, want string }{
-		{"lowercased", "SELECT PG_Read_File('/e')", "select pg_read_file('/e')"},
-		{"line comment becomes a space", "select 1 -- pg_read_file\nfrom t", "select 1  \nfrom t"},
-		{"line comment running to the end", "select 1 -- pg_read_file", "select 1  "},
-		{"block comment becomes a space", "select pg_read_file/**/('/e')", "select pg_read_file ('/e')"},
-		{"nested block comment", "select/* a /* b */ c */1", "select 1"},
-		{"unterminated block comment", "select/* forever", "select "},
-		{"quoting marks drop out", `select "pg_read_file"('/e')`, "select pg_read_file('/e')"},
-		{"a comment inside a name splits it", "select pg_read/**/_file()", "select pg_read _file()"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := scannable(tt.sql); got != tt.want {
-				t.Errorf("scannable(%q) = %q, want %q", tt.sql, got, tt.want)
-			}
-		})
-	}
-}
-
-// The second lock over COPY (#65), read through scannable the way guardRead
-// reads it: the branches are unreachable from guardRead, so they are pinned at
-// the level they run at.
+// The second lock over COPY (#65). Nothing reaches it through guardRead any
+// more — COPY cannot start a readable statement, and the lock no longer reads
+// inside a literal — so it is pinned at the level it runs at (#71).
 func TestCopiesToProgram(t *testing.T) {
 	tests := []struct {
 		name string
@@ -276,37 +255,41 @@ func TestCopiesToProgram(t *testing.T) {
 		{"already lower case", "copy t to program 'x'", true},
 		{"newlines and tabs between the words", "COPY t\n\tTO\n\tPROGRAM\t'x'", true},
 		{"a comment between to and program", "COPY t TO/**/PROGRAM 'x'", true},
-		// Only a quote ends the word, so the dollar-quoted form reads as one —
-		// postgres rejects it as a syntax error anyway.
+		// A dollar sign continues an identifier, so postgres reads program$$x$$
+		// as one name and refuses the statement itself.
 		{"dollar quoting abuts the keyword", "COPY t TO PROGRAM$$x$$", false},
-		// A schema qualification is not a word boundary either, or a table named
-		// program would be unreadable.
 		{"a table called program", "SELECT * FROM program.copy", false},
+		{"a quoted program is a name, not the keyword", `COPY t TO "PROGRAM" 'x'`, false},
 		{"copy without a program", "COPY t TO STDOUT", false},
 		{"copy from a file is not a program", "COPY t FROM '/tmp/f'", false},
 		{"program without the preposition", "COPY program TO STDOUT", false},
 		{"program is the first word", "PROGRAM copy to stdout", false},
 		{"program without a copy", "SELECT * FROM t WHERE note = 'send to program'", false},
+		{"the preposition and the literal without a copy", "SELECT x FROM program 'y'", false},
+		{"program ends the statement", "COPY t TO PROGRAM", false},
 		{"the words in the wrong order", "SELECT 'program to copy'", false},
-		// The price of scanning string literals: deniedCall pays it too, and a
-		// call hiding behind a quote is what neither may miss.
-		{"a literal that reads like a copy", "SELECT 'copy the log to program dir'", true},
+		// A literal holds no statement, so unlike the deny list this lock is not
+		// read into one — the false refusal it used to cost is gone (#71).
+		{"a literal that reads like a copy", "SELECT 'copy the log to program dir'", false},
+		{"the whole command inside a literal", `SELECT 'copy t to program ''sh -c evil'''`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := copiesToProgram(scannable(tt.sql)); got != tt.want {
-				t.Errorf("copiesToProgram(scannable(%q)) = %v, want %v", tt.sql, got, tt.want)
+			if got := copiesToProgram(tokens(tt.sql)); got != tt.want {
+				t.Errorf("copiesToProgram(tokens(%q)) = %v, want %v", tt.sql, got, tt.want)
 			}
 		})
 	}
 }
 
-// A real COPY never reaches the second lock — the keyword check takes it first —
-// so a string literal is the only way to watch the lock refuse on its own.
-func TestSecondLockOverCopyStandsAlone(t *testing.T) {
+// No valid readable statement reaches the second lock: the keyword check takes
+// every real COPY first, and the lock no longer reads inside a literal. What is
+// pinned here is that guardRead still calls it — the token sequence below is one
+// postgres would refuse itself.
+func TestSecondLockOverCopyIsWiredIn(t *testing.T) {
 	var f *mcpsrv.Failure
-	if !errors.As(guardRead(Defaults(), "SELECT 'copy t to program ''sh -c evil'''"), &f) {
-		t.Fatal("a statement carrying COPY … TO PROGRAM must fail")
+	if !errors.As(guardRead(Defaults(), "SELECT copy FROM program 'sh -c evil'"), &f) {
+		t.Fatal("a statement carrying COPY … TO/FROM PROGRAM must fail")
 	}
 	if f.Kind != mcpsrv.KindDenied {
 		t.Errorf("kind = %v, want %v", f.Kind, mcpsrv.KindDenied)
@@ -339,5 +322,54 @@ func TestTrimStatement(t *testing.T) {
 		if got := trimStatement(tt.in); got != tt.want {
 			t.Errorf("trimStatement(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// Every way the deny list came off before it read the statement as postgres
+// lexes it: an escaped identifier spells any name it likes, and a comment marker
+// inside a literal blinds everything after it (#71). The refusal has to name the
+// call, not the disguise.
+func TestDenyListSurvivesLexicalDisguise(t *testing.T) {
+	denied := []struct{ name, sql, call string }{
+		{"unicode escape", `SELECT U&"pg_read_fil\0065"('/etc/passwd')`, "pg_read_file"},
+		{"unicode escape, lower case prefix", `SELECT u&"set_confi\0067"('statement_timeout', '0', false)`, "set_config"},
+		{"the six digit escape", `SELECT U&"pg_ls_di\+000072"('/')`, "pg_ls_dir"},
+		{"uescape picks another character", `SELECT U&"pg_ls_di!0072" UESCAPE '!' ('/')`, "pg_ls_dir"},
+		{"a line comment marker inside a literal", "SELECT '--' AS m, pg_ls_dir('/')", "pg_ls_dir"},
+		{"a block comment marker inside a literal", "SELECT '/*' AS m, pg_ls_dir('/')", "pg_ls_dir"},
+		{"a comment marker inside a dollar quote", "SELECT $$--$$ AS m, pg_ls_dir('/')", "pg_ls_dir"},
+		{"an escaped apostrophe does not open a literal", `SELECT E'\'' AS m, pg_ls_dir('/')`, "pg_ls_dir"},
+		{"a doubled apostrophe does not open one either", "SELECT 'it''s' AS m, pg_ls_dir('/')", "pg_ls_dir"},
+		// The deny list reads inside a literal on purpose: a name assembled there
+		// is passed to something that calls it (ADR-0001).
+		{"a call assembled inside a literal", "SELECT 'pg_read_file(' || '/etc/passwd)'", "pg_read_file"},
+		{"a call further into a literal", "SELECT 'x, pg_read_file(' || '/etc/passwd)'", "pg_read_file"},
+		{"a call quoted inside a dollar quote", "SELECT $q$pg_read_file('/etc/passwd')$q$", "pg_read_file"},
+	}
+	for _, tt := range denied {
+		t.Run(tt.name, func(t *testing.T) {
+			var f *mcpsrv.Failure
+			if !errors.As(guardRead(Defaults(), tt.sql), &f) || f.Kind != mcpsrv.KindDenied {
+				t.Fatalf("guardRead(%q) let it through", tt.sql)
+			}
+			if !strings.Contains(f.Detail, tt.call) {
+				t.Errorf("detail = %q, want it to name %s", f.Detail, tt.call)
+			}
+		})
+	}
+
+	allowed := []struct{ name, sql string }{
+		{"a non-ascii name written with escapes", `SELECT U&"caf\00e9" FROM t`},
+		{"a comment marker as data", "SELECT note FROM t WHERE note LIKE '--%'"},
+		{"a name inside a literal is not a call", "SELECT 'pg_read_file' FROM t"},
+		{"a parameter is not a dollar quote", "SELECT $1 FROM t WHERE id = $2"},
+		{"a broken escape is left to postgres", `SELECT U&"set_confi\zzzz"('a', 'b', false)`},
+	}
+	for _, tt := range allowed {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := guardRead(Defaults(), tt.sql); err != nil {
+				t.Errorf("guardRead(%q) = %v, want it allowed", tt.sql, err)
+			}
+		})
 	}
 }
