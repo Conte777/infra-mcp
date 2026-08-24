@@ -117,7 +117,7 @@ func guardRead(cfg Config, sql string) error {
 // search rather than starting the statement.
 func firstKeyword(toks []token) string {
 	for _, t := range toks {
-		if t.kind == tokenPunct && t.text == "(" {
+		if t.opensArguments() {
 			continue
 		}
 		if t.kind != tokenWord {
@@ -157,7 +157,7 @@ func calledNames(toks []token) []string {
 	for i, t := range toks {
 		switch t.kind {
 		case tokenWord, tokenName:
-			if i+1 < len(toks) && toks[i+1].kind == tokenPunct && toks[i+1].text == "(" {
+			if i+1 < len(toks) && toks[i+1].opensArguments() {
 				names = append(names, t.text)
 			}
 		case tokenString:

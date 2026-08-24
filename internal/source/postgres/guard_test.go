@@ -282,13 +282,13 @@ func TestCopiesToProgram(t *testing.T) {
 	}
 }
 
-// No valid readable statement reaches the second lock: the keyword check takes
-// every real COPY first, and the lock no longer reads inside a literal. What is
-// pinned here is that guardRead still calls it — the token sequence below is one
-// postgres would refuse itself.
+// COPY cannot start a readable statement, so the keyword check takes every real
+// one first — but EXPLAIN can carry it past that check, and the second lock is
+// what refuses it. Postgres would refuse the statement too; the lock is the
+// layer that must not need it to (ADR-0001).
 func TestSecondLockOverCopyIsWiredIn(t *testing.T) {
 	var f *mcpsrv.Failure
-	if !errors.As(guardRead(Defaults(), "SELECT copy FROM program 'sh -c evil'"), &f) {
+	if !errors.As(guardRead(Defaults(), "EXPLAIN COPY t TO PROGRAM 'sh -c evil'"), &f) {
 		t.Fatal("a statement carrying COPY … TO/FROM PROGRAM must fail")
 	}
 	if f.Kind != mcpsrv.KindDenied {
@@ -345,6 +345,10 @@ func TestDenyListSurvivesLexicalDisguise(t *testing.T) {
 		{"a call assembled inside a literal", "SELECT 'pg_read_file(' || '/etc/passwd)'", "pg_read_file"},
 		{"a call further into a literal", "SELECT 'x, pg_read_file(' || '/etc/passwd)'", "pg_read_file"},
 		{"a call quoted inside a dollar quote", "SELECT $q$pg_read_file('/etc/passwd')$q$", "pg_read_file"},
+		{"a hex escape inside an E-string", `SELECT E'set_confi\x67(''a'',''b'',false)'`, "set_config"},
+		{"an octal escape inside an E-string", `SELECT E'lo_expor\164(1,''/tmp/x'')'`, "lo_export"},
+		{"a unicode escape inside an E-string", `SELECT E'dblin\u006b(''h'',''s'')'`, "dblink"},
+		{"a name split across joined constants", "SELECT 'pg_ls_di'\n'r(''.'')'", "pg_ls_dir"},
 	}
 	for _, tt := range denied {
 		t.Run(tt.name, func(t *testing.T) {

@@ -33,8 +33,46 @@ func TestTokens(t *testing.T) {
 		{"an escaped apostrophe ends nothing", `select E'\'' , 1`, []token{
 			{tokenWord, "select"}, {tokenString, "'"}, {tokenPunct, ","}, {tokenWord, "1"},
 		}},
-		{"an escape stands for the byte after it", `select E'a\bc'`, []token{
+		{"a hex escape is the byte it names", `select E'a\x62c'`, []token{
 			{tokenWord, "select"}, {tokenString, "abc"},
+		}},
+		{"an octal escape is the byte it names", `select E'a\142c'`, []token{
+			{tokenWord, "select"}, {tokenString, "abc"},
+		}},
+		{"a unicode escape is the rune it names", `select E'a\u0062c'`, []token{
+			{tokenWord, "select"}, {tokenString, "abc"},
+		}},
+		{"the eight digit unicode escape", `select E'a\U00000062c'`, []token{
+			{tokenWord, "select"}, {tokenString, "abc"},
+		}},
+		{"the named escapes are the characters they name", `select E'a\b\f\n\r\tc'`, []token{
+			{tokenWord, "select"}, {tokenString, "a\b\f\n\r\tc"},
+		}},
+		{"an escape postgres does not define is the character itself", `select E'a\zc'`, []token{
+			{tokenWord, "select"}, {tokenString, "azc"},
+		}},
+		{"a truncated hex escape is the character itself", `select E'a\xzc'`, []token{
+			{tokenWord, "select"}, {tokenString, "axzc"},
+		}},
+		{"a backslash ending the input", `select E'a\`, []token{
+			{tokenWord, "select"}, {tokenString, `a\`},
+		}},
+		// Postgres joins two constants separated by whitespace holding a newline,
+		// so a name split across the seam is one name to it.
+		{"constants joined across a newline", "select 'pg_ls_di'\n'r('", []token{
+			{tokenWord, "select"}, {tokenString, "pg_ls_dir("},
+		}},
+		{"without a newline they stay apart", "select 'pg_ls_di' 'r('", []token{
+			{tokenWord, "select"}, {tokenString, "pg_ls_di"}, {tokenString, "r("},
+		}},
+		{"a comment carries the newline", "select 'pg_ls_di'--c\n'r('", []token{
+			{tokenWord, "select"}, {tokenString, "pg_ls_dir("},
+		}},
+		{"a block comment carrying a newline", "select 'a'/*\n*/'b'", []token{
+			{tokenWord, "select"}, {tokenString, "ab"},
+		}},
+		{"the seam joins prefixed forms too", "select E'pg_ls_d\\x69'\n'r('", []token{
+			{tokenWord, "select"}, {tokenString, "pg_ls_dir("},
 		}},
 		{"bit and hex strings", "select b'10', x'ff'", []token{
 			{tokenWord, "select"}, {tokenString, "10"}, {tokenPunct, ","}, {tokenString, "ff"},
