@@ -297,8 +297,6 @@ func cellText(v any) string {
 		return "" // NULL as an empty cell; the literal costs +17% tokens
 	case string:
 		return t
-	case []byte:
-		return fmt.Sprintf("\\x%x", t) // postgres bytea syntax, not a Go byte-slice dump
 	case time.Time:
 		return t.Format(time.RFC3339Nano)
 	case bool:

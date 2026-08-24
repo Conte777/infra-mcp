@@ -2,9 +2,11 @@ package mcpsrv
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -76,13 +78,33 @@ func expandString(s string) (string, error) {
 	return out, nil
 }
 
-// secretPaths returns the JSON path of every field tagged `mcpsrv:"secret"`.
-func secretPaths[C any]() [][]string {
-	return secretFields(reflect.TypeFor[C](), nil)
+// segment is one step of a secret's path: a JSON key, or every element of the
+// container under the previous key. Which container it is — a list or an object
+// — the document decides, not the type, so one template matches both.
+type segment struct {
+	key  string
+	each bool
 }
 
-func secretFields(t reflect.Type, prefix []string) [][]string {
-	var out [][]string
+// secretPaths returns the path of every field tagged `mcpsrv:"secret"`. Paths
+// that lead through a map the core itself owns — its environments — are
+// produced like any other and never match: checkSecrets runs on one level of
+// the file, with those keys already taken out of it. Leaving them costs
+// nothing; excluding them would cost the core a tag naming its own keys.
+func secretPaths[C any]() [][]segment {
+	return secretFields(reflect.TypeFor[C](), nil, map[reflect.Type]bool{})
+}
+
+func secretFields(t reflect.Type, prefix []segment, onPath map[reflect.Type]bool) [][]segment {
+	// A type reachable from itself would otherwise recurse forever; the cycle
+	// carries no field the first turn has not already produced.
+	if onPath[t] {
+		return nil
+	}
+	onPath[t] = true
+	defer delete(onPath, t)
+
+	var out [][]segment
 	for _, f := range reflect.VisibleFields(t) {
 		// Promoted fields come through separately, at the level they occupy in JSON.
 		if f.Anonymous {
@@ -92,17 +114,48 @@ func secretFields(t reflect.Type, prefix []string) [][]string {
 		if name == "" {
 			continue
 		}
-		path := append(append([]string{}, prefix...), name)
+		path := append(append([]segment{}, prefix...), segment{key: name})
 
+		// Containers are stripped before the tag is read, not after: a field
+		// marked secret may itself be a list or a map of them, and a path that
+		// stops at the key reaches a container where checkSecrets looks for a
+		// string — the same silent pass this walk exists to close.
+		ft, path := descend(f.Type, path)
 		if f.Tag.Get("mcpsrv") == "secret" {
 			out = append(out, path)
 			continue
 		}
-		if f.Type.Kind() == reflect.Struct {
-			out = append(out, secretFields(f.Type, path)...)
+		if ft.Kind() == reflect.Struct {
+			out = append(out, secretFields(ft, path, onPath)...)
 		}
 	}
 	return out
+}
+
+// descend strips container layers off t until something that is not a container
+// is left, adding one "each" segment per layer that JSON nests — a pointer nests
+// nothing. It strips the class rather than the forms it happened to know: a
+// container the walk does not step through is a secret it silently fails to
+// check.
+//
+// A container can reach itself without passing through a struct — `type Tree
+// map[string]Tree` is legal Go — so the stripping keeps its own guard: the one
+// in secretFields only ever sees struct types.
+func descend(t reflect.Type, path []segment) (reflect.Type, []segment) {
+	stripped := map[reflect.Type]bool{}
+	for !stripped[t] {
+		stripped[t] = true
+		switch t.Kind() {
+		case reflect.Pointer:
+			t = t.Elem()
+		case reflect.Slice, reflect.Array, reflect.Map:
+			path = append(path, segment{each: true})
+			t = t.Elem()
+		default:
+			return t, path
+		}
+	}
+	return t, path
 }
 
 func jsonName(f reflect.StructField) string {
@@ -123,34 +176,64 @@ func jsonName(f reflect.StructField) string {
 // checkSecrets rejects a secret written as anything but a bare ${VAR}. It runs
 // on the raw document: after expansion the literal and the reference are the
 // same string.
-func checkSecrets(raw any, paths [][]string) error {
+func checkSecrets(raw any, paths [][]segment) error {
 	for _, p := range paths {
-		v, ok := lookup(raw, p)
-		if !ok {
-			continue // absent or mistyped — the schema has already spoken
-		}
-		s, ok := v.(string)
-		if !ok {
-			continue
-		}
-		if !secretRef.MatchString(s) {
-			return fmt.Errorf("%s must be ${VAR} naming an environment variable, not a literal", strings.Join(p, "."))
+		if err := checkPath(raw, p, ""); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func lookup(raw any, path []string) (any, bool) {
-	cur := raw
-	for _, key := range path {
-		m, ok := cur.(map[string]any)
+// checkPath walks one template into the document, carrying `at` — the place it
+// actually reached, indices and keys included, because that is what sends a
+// reader to the line of the file.
+func checkPath(v any, path []segment, at string) error {
+	if len(path) == 0 {
+		s, ok := v.(string)
 		if !ok {
-			return nil, false
+			return nil // absent or mistyped — the schema has already spoken
 		}
-		cur, ok = m[key]
+		if !secretRef.MatchString(s) {
+			return fmt.Errorf("%s must be ${VAR} naming an environment variable, not a literal", at)
+		}
+		return nil
+	}
+
+	seg, rest := path[0], path[1:]
+	if !seg.each {
+		m, ok := v.(map[string]any)
 		if !ok {
-			return nil, false
+			return nil
+		}
+		next, ok := m[seg.key]
+		if !ok {
+			return nil
+		}
+		return checkPath(next, rest, join(at, seg.key))
+	}
+
+	switch c := v.(type) {
+	case []any:
+		for i, el := range c {
+			if err := checkPath(el, rest, fmt.Sprintf("%s[%d]", at, i)); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		// Sorted, so two literals in one object always name the same one first.
+		for _, k := range slices.Sorted(maps.Keys(c)) {
+			if err := checkPath(c[k], rest, join(at, k)); err != nil {
+				return err
+			}
 		}
 	}
-	return cur, true
+	return nil
+}
+
+func join(at, key string) string {
+	if at == "" {
+		return key
+	}
+	return at + "." + key
 }

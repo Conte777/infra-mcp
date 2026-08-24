@@ -63,11 +63,11 @@ func TestTableEscapesCellsAndHeaders(t *testing.T) {
 func TestCellFormatting(t *testing.T) {
 	ts := time.Date(2026, 8, 21, 10, 30, 0, 0, time.UTC)
 	out := Markdown([]Block{Table{
-		Columns: []string{"b", "raw", "at", "f"},
-		Rows:    [][]any{{true, []byte{0xde, 0xad}, ts, 1.5}},
+		Columns: []string{"b", "at", "f"},
+		Rows:    [][]any{{true, ts, 1.5}},
 	}}, Budget{})
 
-	want := "|b|raw|at|f|\n|-|-|-|-|\n|true|\\xdead|2026-08-21T10:30:00Z|1.5|\n"
+	want := "|b|at|f|\n|-|-|-|\n|true|2026-08-21T10:30:00Z|1.5|\n"
 	if out != want {
 		t.Fatalf("Markdown() = %q, want %q", out, want)
 	}

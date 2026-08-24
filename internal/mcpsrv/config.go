@@ -345,7 +345,7 @@ func without(level map[string]any, key string) map[string]any {
 // because after expansion a ${VAR} and a literal are the same string, and the
 // round trip through JSON applies the object on top of defaults, so a key it
 // leaves out keeps the default.
-func decode[C any](level map[string]any, defaults C, secrets [][]string) (C, error) {
+func decode[C any](level map[string]any, defaults C, secrets [][]segment) (C, error) {
 	var zero C
 	if err := checkSecrets(level, secrets); err != nil {
 		return zero, err
