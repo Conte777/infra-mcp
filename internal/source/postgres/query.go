@@ -66,7 +66,7 @@ func runQuery(ctx context.Context, tx pgx.Tx, cfg Config, in sqlArgs) ([]block.B
 // cursorable reports whether DECLARE CURSOR accepts the statement: it takes a
 // query, which SHOW and EXPLAIN are not.
 func cursorable(sql string) bool {
-	switch firstKeyword(sql) {
+	switch firstKeyword(tokens(sql)) {
 	case "select", "with", "table", "values":
 		return true
 	default:
