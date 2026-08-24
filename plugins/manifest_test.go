@@ -1,6 +1,7 @@
 // Package plugins carries no code: a plugin is a manifest, an .mcp.json and a
 // shell launcher. These tests are the only gate those three files have, and
-// they ride in `task test` rather than a CI target of their own.
+// they ride in `task test` rather than a CI target of their own — as does the
+// agreement between a manifest version and the CHANGELOG section describing it.
 package plugins
 
 import (
@@ -75,6 +76,28 @@ func TestManifestVersionIsATagWithoutThePrefix(t *testing.T) {
 	for _, path := range manifests(t) {
 		if v := manifestVersion(t, path); !tagVersion.MatchString(v) {
 			t.Errorf("%s: version = %q, want X.Y.Z with no leading v", path, v)
+		}
+	}
+}
+
+// The CHANGELOG carries no Unreleased heading: a section exists only for a
+// released version, and the pull request that bumps the manifests is what
+// writes it (ADR-0005). A bump without a section is therefore a release nobody
+// described, and it surfaces only to whoever reads the file months later.
+func TestManifestVersionHasAChangelogSection(t *testing.T) {
+	const changelog = "../CHANGELOG.md"
+
+	raw, err := os.ReadFile(changelog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range manifests(t) {
+		v := manifestVersion(t, path)
+		// Only the version is matched. The date on the same line is prose: it is
+		// written one merge before the tag it dates.
+		section := regexp.MustCompile(`(?m)^## \[` + regexp.QuoteMeta(v) + `\]`)
+		if !section.Match(raw) {
+			t.Errorf("%s: version %q has no `## [%s]` section in %s", path, v, v, changelog)
 		}
 	}
 }
