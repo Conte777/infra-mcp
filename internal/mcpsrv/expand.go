@@ -86,7 +86,11 @@ type segment struct {
 	each bool
 }
 
-// secretPaths returns the path of every field tagged `mcpsrv:"secret"`.
+// secretPaths returns the path of every field tagged `mcpsrv:"secret"`. Paths
+// that lead through a map the core itself owns — its environments — are
+// produced like any other and never match: checkSecrets runs on one level of
+// the file, with those keys already taken out of it. Leaving them costs
+// nothing; excluding them would cost the core a tag naming its own keys.
 func secretPaths[C any]() [][]segment {
 	return secretFields(reflect.TypeFor[C](), nil, map[reflect.Type]bool{})
 }
@@ -112,11 +116,15 @@ func secretFields(t reflect.Type, prefix []segment, onPath map[reflect.Type]bool
 		}
 		path := append(append([]segment{}, prefix...), segment{key: name})
 
+		// Containers are stripped before the tag is read, not after: a field
+		// marked secret may itself be a list or a map of them, and a path that
+		// stops at the key reaches a container where checkSecrets looks for a
+		// string — the same silent pass this walk exists to close.
+		ft, path := descend(f.Type, path)
 		if f.Tag.Get("mcpsrv") == "secret" {
 			out = append(out, path)
 			continue
 		}
-		ft, path := descend(f.Type, path)
 		if ft.Kind() == reflect.Struct {
 			out = append(out, secretFields(ft, path, onPath)...)
 		}
@@ -129,8 +137,14 @@ func secretFields(t reflect.Type, prefix []segment, onPath map[reflect.Type]bool
 // nothing. It strips the class rather than the forms it happened to know: a
 // container the walk does not step through is a secret it silently fails to
 // check.
+//
+// A container can reach itself without passing through a struct — `type Tree
+// map[string]Tree` is legal Go — so the stripping keeps its own guard: the one
+// in secretFields only ever sees struct types.
 func descend(t reflect.Type, path []segment) (reflect.Type, []segment) {
-	for {
+	stripped := map[reflect.Type]bool{}
+	for !stripped[t] {
+		stripped[t] = true
 		switch t.Kind() {
 		case reflect.Pointer:
 			t = t.Elem()
@@ -141,6 +155,7 @@ func descend(t reflect.Type, path []segment) (reflect.Type, []segment) {
 			return t, path
 		}
 	}
+	return t, path
 }
 
 func jsonName(f reflect.StructField) string {

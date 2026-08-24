@@ -40,6 +40,20 @@ type testChain struct {
 	Connection testConnection `json:"connection,omitzero"`
 }
 
+// testTree reaches itself without passing through a struct, so the guard that
+// stops testChain never sees it.
+type testTree map[string]testTree
+
+type testGrove struct {
+	Tree testTree `json:"tree,omitzero"`
+}
+
+// testBundle marks a container as the secret: what must be a ${VAR} is every
+// string inside it, not the list holding them.
+type testBundle struct {
+	Passwords []string `json:"passwords,omitzero" mcpsrv:"secret"`
+}
+
 type testConfig struct {
 	Common[testCluster, testReadTools]
 	testCluster
@@ -281,6 +295,36 @@ func TestSecretPathsStopsAtACycle(t *testing.T) {
 	want := [][]segment{seg("connection", "password")}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("secretPaths = %v, want %v", got, want)
+	}
+}
+
+// A container reaching itself is a cycle no struct boundary interrupts; the
+// walk has to end on its own, and the test hangs rather than fails if it does not.
+func TestSecretPathsStopsAtAContainerCycle(t *testing.T) {
+	if got := secretPaths[testGrove](); got != nil {
+		t.Errorf("secretPaths = %v, want none", got)
+	}
+}
+
+// The tag says the strings are secrets; the list holding them is not a place a
+// ${VAR} can be written, so the path has to reach through it.
+func TestSecretPathsReachThroughATaggedContainer(t *testing.T) {
+	got := secretPaths[testBundle]()
+	want := [][]segment{seg("passwords", "*")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("secretPaths = %v, want %v", got, want)
+	}
+
+	var raw any
+	if err := json.Unmarshal([]byte(`{"passwords":["${PGPASSWORD}","hunter2"]}`), &raw); err != nil {
+		t.Fatal(err)
+	}
+	err := checkSecrets(raw, got)
+	if err == nil {
+		t.Fatal("checkSecrets accepted a literal inside a tagged list")
+	}
+	if !strings.HasPrefix(err.Error(), "passwords[1] must be") {
+		t.Errorf("error %q does not name passwords[1]", err)
 	}
 }
 
