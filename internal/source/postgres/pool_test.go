@@ -211,6 +211,40 @@ func TestPoolsRefuseAcquireAfterClose(t *testing.T) {
 	}
 }
 
+// An eviction can put a second pool at an address while the first call still
+// holds the first pool. Then forget belongs to a pool that has already left the
+// cache, and the entry sitting at that address is a healthy successor. Two
+// goroutines produce this in the field; with a limit of one it is linear.
+func TestPoolsForgetLeavesASuccessorAlone(t *testing.T) {
+	p, cfg := testPools(t, 1, time.Minute)
+
+	first, releaseFirst := mustAcquire(t, p, cfg, "a")
+	defer releaseFirst()
+	_, releaseB := mustAcquire(t, p, cfg, "b") // evicts the busy "a"
+	defer releaseB()
+	second, releaseSecond := mustAcquire(t, p, cfg, "a") // a new entry for the same address
+	// Released, so that a wrong drop closes the successor then and there: held,
+	// it would leave the cache alive and only the map lookup below would notice.
+	releaseSecond()
+
+	if first == second {
+		t.Fatal("the evicted pool came back out of the cache")
+	}
+
+	p.forget(at("a"), first)
+
+	e, ok := p.byAddr[at("a")]
+	switch {
+	case !ok:
+		t.Error("forget dropped the entry of a pool it was not given")
+	case e.pool != second:
+		t.Errorf("the address holds %p, want the successor %p", e.pool, second)
+	}
+	if closed(t, second) {
+		t.Error("the successor was closed for another pool's failure")
+	}
+}
+
 // Shutdown must not block on a call that is still running: the core gives that
 // call its grace period and the last release does the closing.
 func TestPoolsCloseDefersToTheLastRelease(t *testing.T) {
